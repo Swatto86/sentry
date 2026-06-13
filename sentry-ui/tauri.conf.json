@@ -5,7 +5,7 @@
   "identifier": "co.swatto.sentry",
   "build": {
     "frontendDist": "../ui",
-    "beforeBuildCommand": "cargo build -p sentry-svc --release && copy ..\\target\\release\\sentry-svc.exe bin\\sentry-svc.exe",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File build-svc.ps1",
     "beforeDevCommand": ""
   },
   "app": {
