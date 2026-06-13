@@ -107,7 +107,9 @@ impl AiClient {
             }
         };
         Ok(Self {
-            http: Client::new(),
+            http: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()?,
             config: inner,
         })
     }

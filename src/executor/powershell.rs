@@ -22,7 +22,7 @@ pub async fn run_diagnostic(script: &str) -> Result<String> {
     if output.status.success() {
         Ok(stdout.to_string())
     } else {
-        Ok(format!(
+        Err(anyhow::anyhow!(
             "Script exited with code {:?}\nstdout: {stdout}\nstderr: {stderr}",
             output.status.code()
         ))

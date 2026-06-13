@@ -240,8 +240,6 @@ fn main() {
                 })
                 .build(app)?;
 
-            let app_handle = app.handle().clone();
-            let _ = app_handle; // used for future event emission
             tauri::async_runtime::spawn(async move {
                 sentry_loop(shared_for_loop, tray).await;
             });
