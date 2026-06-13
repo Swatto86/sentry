@@ -1,5 +1,6 @@
 [api]
 provider = "claude_cli"
+claude_cli_path = "C:\\Users\\Swatto\\.local\\bin\\claude.exe"
 user_profile = "C:\\Users\\Swatto"
 model = ""
 
