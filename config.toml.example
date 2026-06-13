@@ -5,7 +5,7 @@
 # login session. Set it to your Windows user profile directory.
 provider = "claude_cli"
 user_profile = "C:\\Users\\YourName"
-# claude_cli_path = "C:\\Users\\YourName\\AppData\\Roaming\\npm\\claude.cmd"  # if not in PATH
+# claude_cli_path = "C:\\Users\\YourName\\.local\\bin\\claude.exe"  # if not in PATH
 model = ""   # leave empty to use the CLI's configured default, or set e.g. "claude-opus-4-8"
 
 # ── Option B: Anthropic native API ────────────────────────────────────────────
