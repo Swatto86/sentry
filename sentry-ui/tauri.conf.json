@@ -41,7 +41,8 @@
     "shortDescription": "Autonomous Windows system repair agent",
     "longDescription": "Sentry monitors Windows system health and autonomously diagnoses and repairs problems — service failures, disk pressure, log corruption, driver issues, and more — using Claude AI as its reasoning engine.",
     "resources": {
-      "bin/sentry-svc.exe": "sentry-svc.exe"
+      "bin/sentry-svc.exe": "sentry-svc.exe",
+      "../config.toml.example": "config.toml.example"
     },
     "windows": {
       "allowDowngrades": false,
