@@ -111,6 +111,9 @@ pub enum FixAction {
     DiskCleanup {
         target: String,
     },
+    // serde's snake_case would yield "power_shell_diagnostic"; the prompt and
+    // model use "powershell_diagnostic", so pin the tag explicitly.
+    #[serde(rename = "powershell_diagnostic")]
     PowerShellDiagnostic {
         script: String,
     },
