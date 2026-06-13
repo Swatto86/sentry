@@ -10,7 +10,12 @@
   ExecWait 'sc stop SentrySvc'
   ExecWait '"$INSTDIR\sentry-svc.exe" uninstall'
 
-  ; Register the service and start it
+  ; Copy default config if one does not already exist.
+  ; User must set claude_cli_path and user_profile before the service will work.
+  IfFileExists "$INSTDIR\config.toml" +2
+    CopyFiles /SILENT "$INSTDIR\config.toml.example" "$INSTDIR\config.toml"
+
+  ; Register and start the service
   ExecWait '"$INSTDIR\sentry-svc.exe" install'
   ExecWait 'sc start SentrySvc'
 !macroend
