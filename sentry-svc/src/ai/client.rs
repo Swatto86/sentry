@@ -334,6 +334,8 @@ impl AiClient {
         if !model.is_empty() {
             cmd.args(["--model", model]);
         }
+        // Reap the (large) claude process if this future is dropped on timeout.
+        cmd.kill_on_drop(true);
 
         // When the service runs as LocalSystem, set user-space env vars so the CLI
         // can locate the logged-in session stored in the user's AppData.
@@ -361,12 +363,14 @@ impl AiClient {
                 .context("Failed to write prompt to claude CLI stdin")?;
         }
 
+        // The claude CLI is a ~245 MB binary with a cold Node start plus full
+        // model inference and no streaming, so allow a generous window.
         let output = tokio::time::timeout(
-            std::time::Duration::from_secs(120),
+            std::time::Duration::from_secs(300),
             child.wait_with_output(),
         )
         .await
-        .context("claude CLI timed out after 120s")?
+        .context("claude CLI timed out after 300s")?
         .context("claude CLI process error")?;
 
         if !output.status.success() {
