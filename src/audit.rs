@@ -27,7 +27,7 @@ pub async fn log_decision(
         .problems
         .iter()
         .map(|p| p.confidence)
-        .fold(f32::NEG_INFINITY, f32::max);
+        .fold(0f32, f32::max);
     let executed_int: i64 = if executed { 1 } else { 0 };
 
     let id = sqlx::query(

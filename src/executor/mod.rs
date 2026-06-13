@@ -104,7 +104,7 @@ pub async fn execute(action: &FixAction) -> ExecutionResult {
             let script = format!(
                 r#"$item = Get-Item -LiteralPath '{safe}' -ErrorAction SilentlyContinue
 if (-not $item) {{ Write-Output 'Not found (already gone?): {safe}' }}
-elseif ($item.PSIsContainer) {{ Write-Error 'Refusing to delete directory: {safe}' }}
+elseif ($item.PSIsContainer) {{ throw 'Refusing to delete directory: {safe}' }}
 else {{ Remove-Item -LiteralPath '{safe}' -Force -ErrorAction Stop; Write-Output 'Deleted: {safe}' }}"#
             );
             make_result(action, powershell::run_diagnostic(&script).await)

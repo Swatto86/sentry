@@ -9,7 +9,7 @@ if ($pkg) {{
     $pkg | Uninstall-Package -Force -ErrorAction Stop
     Write-Output 'Uninstalled via PackageManagement: {safe_name}'
 }} else {{
-    $msi = Get-WmiObject Win32_Product -Filter "Name='${safe_name}'" -ErrorAction SilentlyContinue
+    $msi = Get-WmiObject Win32_Product -Filter "Name='{safe_name}'" -ErrorAction SilentlyContinue
     if ($msi) {{
         $msi.Uninstall() | Out-Null
         Write-Output 'Uninstalled via Win32_Product: {safe_name}'

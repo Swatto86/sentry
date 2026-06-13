@@ -19,7 +19,7 @@ pub async fn bcd_edit(element: &str, value: &str) -> Result<String> {
         );
     }
     // Reject shell-injection characters in the value
-    if value.chars().any(|c| matches!(c, '{' | '}' | ';' | '&' | '|' | '`' | '$' | '(' | ')')) {
+    if value.chars().any(|c| matches!(c, '{' | '}' | ';' | '&' | '|' | '`' | '$' | '(' | ')' | '\n' | '\r' | '"')) {
         bail!("BCD value contains disallowed characters: {value}");
     }
 
@@ -27,7 +27,7 @@ pub async fn bcd_edit(element: &str, value: &str) -> Result<String> {
     let safe_val = value.replace('\'', "''");
     // Single-quote {current} so PowerShell doesn't try to expand the braces.
     let script = format!(
-        "bcdedit /set '{{current}}' {safe_el} {safe_val}; \
+        "bcdedit /set '{{current}}' {safe_el} '{safe_val}'; \
          if ($LASTEXITCODE -ne 0) {{ throw 'bcdedit failed' }}; \
          Write-Output 'BCD updated: {safe_el}={safe_val}'"
     );
