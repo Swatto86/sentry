@@ -110,14 +110,21 @@ impl AiClient {
                         model: cfg.model.clone(),
                     }
                 }
-                ApiProvider::ClaudeCli => AiClientConfig::ClaudeCli {
-                    binary: cfg
-                        .claude_cli_path
-                        .clone()
-                        .unwrap_or_else(|| "claude".into()),
-                    model: cfg.model.clone(),
-                    user_profile: cfg.user_profile.clone(),
-                },
+                ApiProvider::ClaudeCli => {
+                    let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
+                    let binary =
+                        resolve_claude_binary(cfg.claude_cli_path.as_deref(), user_profile.as_deref());
+                    info!(
+                        binary = %binary,
+                        user_profile = user_profile.as_deref().unwrap_or("<not found>"),
+                        "claude_cli provider configured"
+                    );
+                    AiClientConfig::ClaudeCli {
+                        binary,
+                        model: cfg.model.clone(),
+                        user_profile,
+                    }
+                }
             };
         Ok(Self {
             http: Client::builder()
@@ -378,6 +385,46 @@ impl AiClient {
 
         Ok(text)
     }
+}
+
+/// A configured value counts as "set" if it is non-empty and not the shipped
+/// placeholder (the example config uses "YourName").
+fn is_real(value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && !v.contains("YourName")
+}
+
+/// Resolve the Windows user profile whose logged-in `claude` session the service
+/// should borrow. Uses the configured value when set, otherwise scans `C:\Users`
+/// for the first profile holding a Claude CLI credentials file.
+fn resolve_user_profile(configured: Option<&str>) -> Option<String> {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return Some(p.trim().to_string());
+    }
+    let users = std::fs::read_dir("C:\\Users").ok()?;
+    for entry in users.flatten() {
+        let dir = entry.path();
+        if dir.join(".claude").join(".credentials.json").is_file() {
+            return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Resolve the path to the `claude` binary. Uses the configured value when set,
+/// otherwise looks for the standard install location under the resolved user
+/// profile, and finally falls back to "claude" (must then be on PATH).
+fn resolve_claude_binary(configured: Option<&str>, user_profile: Option<&str>) -> String {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return p.trim().to_string();
+    }
+    if let Some(up) = user_profile {
+        let candidate = format!("{up}\\.local\\bin\\claude.exe");
+        if std::path::Path::new(&candidate).is_file() {
+            return candidate;
+        }
+    }
+    "claude".into()
 }
 
 fn strip_fences(s: &str) -> &str {

@@ -1,11 +1,13 @@
 [api]
 # ── Option A: Claude CLI (no API key — uses your logged-in `claude` session) ──
 # This is the recommended option if you use Claude Code / Claude Max.
-# The service runs as LocalSystem, so `user_profile` tells it where to find your
-# login session. Set it to your Windows user profile directory.
+# The service runs as LocalSystem. Leave user_profile and claude_cli_path blank
+# and it auto-detects: it scans C:\Users for the profile that holds a logged-in
+# Claude session (~/.claude/.credentials.json) and finds claude.exe under it.
+# Set them explicitly only to override auto-detection.
 provider = "claude_cli"
-user_profile = "C:\\Users\\YourName"
-# claude_cli_path = "C:\\Users\\YourName\\.local\\bin\\claude.exe"  # if not in PATH
+# user_profile = "C:\\Users\\YourName"
+# claude_cli_path = "C:\\Users\\YourName\\.local\\bin\\claude.exe"
 model = ""   # leave empty to use the CLI's configured default, or set e.g. "claude-opus-4-8"
 
 # ── Option B: Anthropic native API ────────────────────────────────────────────
