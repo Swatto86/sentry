@@ -1,6 +1,6 @@
 [package]
 name = "sentry-svc"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 authors = ["Swatto <claude.ai@swatto.co.uk>"]
 description = "Sentry system monitor service — runs as LocalSystem"
@@ -42,6 +42,7 @@ anyhow = "1"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 toml = "0.8"
 tokio-stream = "0.1"
 futures-util = "0.3"
