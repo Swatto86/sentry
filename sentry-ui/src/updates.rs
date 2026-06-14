@@ -2,8 +2,9 @@
 //! runs winget elevated through `Start-Process -Verb RunAs` (one UAC prompt) so
 //! machine-scope packages can be installed.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::os::windows::process::CommandExt;
+use tokio::io::AsyncWriteExt;
 
 /// CREATE_NO_WINDOW — keep the console-based winget/powershell hidden.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -174,6 +175,261 @@ pub async fn update_all_apps() -> Result<String, String> {
     .await
 }
 
+// ── AI update check (apps winget can't manage) ───────────────────────────────
+
+#[derive(Serialize, Clone, Debug)]
+pub struct AiUpdate {
+    pub name: String,
+    pub current: String,
+    pub latest: String,
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct AiCheckResult {
+    pub updates: Vec<AiUpdate>,
+    pub checked: usize,
+    pub cost_usd: f64,
+    pub note: Option<String>,
+}
+
+/// Cap on apps sent to the AI in one batch, to bound cost/latency.
+const AI_CHECK_CAP: usize = 20;
+
+/// Names we never AI-check: drivers, runtimes, redistributables, self-updating
+/// suites, and Sentry itself. Keeps the batch to real, user-updatable apps.
+fn is_noise(name: &str) -> bool {
+    let n = name.to_lowercase();
+    const SKIP: &[&str] = &[
+        "driver",
+        "redistributable",
+        "runtime",
+        "microsoft visual c++",
+        "windows sdk",
+        "update for",
+        "security update",
+        "hotfix",
+        "maintenance service",
+        ".net",
+        "directx",
+        "nvidia",
+        "realtek",
+        "intel(r)",
+        "host app",
+        "web experience",
+        "microsoft 365",
+        "office",
+        "visual studio installer",
+        "onedrive",
+        "teams machine-wide",
+        "sentry",
+    ];
+    SKIP.iter().any(|s| n.contains(s))
+}
+
+/// Parse `winget list` for apps with no package source — rows that do NOT end in
+/// "winget"/"msstore" can't be updated by winget. Returns (name, version).
+fn parse_unmanaged(text: &str) -> Vec<(String, String)> {
+    let mut apps = Vec::new();
+    let mut in_table = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !in_table {
+            if trimmed.contains("-----") {
+                in_table = true;
+            }
+            continue;
+        }
+        if trimmed.is_empty() {
+            continue;
+        }
+        let cols = split_columns(trimmed);
+        if cols.len() < 3 {
+            continue;
+        }
+        let last = cols.last().map(|s| s.as_str()).unwrap_or("");
+        if last.eq_ignore_ascii_case("winget") || last.eq_ignore_ascii_case("msstore") {
+            continue; // winget-managed — handled by the winget panel
+        }
+        let name = cols[0].clone();
+        let version = cols[2].clone();
+        if name.is_empty() || version.is_empty() || is_noise(&name) {
+            continue;
+        }
+        apps.push((name, version));
+    }
+    apps
+}
+
+fn claude_binary() -> String {
+    if let Ok(profile) = std::env::var("USERPROFILE") {
+        let candidate = format!("{profile}\\.local\\bin\\claude.exe");
+        if std::path::Path::new(&candidate).is_file() {
+            return candidate;
+        }
+    }
+    "claude".into()
+}
+
+fn strip_fences(s: &str) -> &str {
+    let t = s.trim();
+    for (open, close) in [("```json", "```"), ("```", "```")] {
+        if let Some(i) = t.find(open) {
+            let after = &t[i + open.len()..];
+            return after.find(close).map(|e| &after[..e]).unwrap_or(after).trim();
+        }
+    }
+    t
+}
+
+#[derive(Deserialize)]
+struct CliEnvelope {
+    result: Option<String>,
+    total_cost_usd: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct AiResp {
+    updates: Vec<AiUpdateRaw>,
+}
+
+#[derive(Deserialize)]
+struct AiUpdateRaw {
+    name: String,
+    #[serde(default)]
+    current: String,
+    #[serde(default)]
+    latest: String,
+    #[serde(default)]
+    url: String,
+}
+
+/// On-demand: ask Claude (with web lookup) for updates to apps winget can't
+/// manage. Returns the found updates plus the equivalent cost of this check.
+#[tauri::command]
+pub async fn check_ai_updates() -> Result<AiCheckResult, String> {
+    // 1. Apps winget can't manage.
+    let list_out = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("winget")
+            .args(["list", "--accept-source-agreements", "--disable-interactivity"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("winget is not available: {e}"))?;
+
+    let mut apps = parse_unmanaged(&String::from_utf8_lossy(&list_out.stdout));
+    let total = apps.len();
+    let mut note = None;
+    if apps.len() > AI_CHECK_CAP {
+        apps.truncate(AI_CHECK_CAP);
+        note = Some(format!(
+            "Checked the first {AI_CHECK_CAP} of {total} apps winget doesn't manage."
+        ));
+    }
+    if apps.is_empty() {
+        return Ok(AiCheckResult {
+            updates: vec![],
+            checked: 0,
+            cost_usd: 0.0,
+            note: Some("No non-winget apps to check.".into()),
+        });
+    }
+
+    // 2. Ask Claude to look up the latest versions.
+    let app_lines = apps
+        .iter()
+        .map(|(n, v)| format!("- {n} ({v})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt = format!(
+        "You are an application update checker. Below are installed Windows applications with their \
+current versions. Use web search to find each one's latest STABLE release from its official source. \
+Return ONLY the apps that have a NEWER version available.\n\n\
+Respond ONLY with JSON, no markdown:\n\
+{{\"updates\":[{{\"name\":\"<app>\",\"current\":\"<installed>\",\"latest\":\"<newer version>\",\"url\":\"<official download or releases page URL>\"}}]}}\n\
+Omit apps that are already current or that you cannot verify. Only include real, verified versions.\n\n\
+INSTALLED APPS:\n{app_lines}"
+    );
+
+    let binary = claude_binary();
+    let mut std_cmd = std::process::Command::new(&binary);
+    std_cmd
+        .args(["--print", "--output-format", "json"])
+        .creation_flags(CREATE_NO_WINDOW);
+    let mut cmd = tokio::process::Command::from(std_cmd);
+    cmd.kill_on_drop(true)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("failed to run claude: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(420), child.wait_with_output())
+        .await
+        .map_err(|_| "AI check timed out after 7 minutes".to_string())?
+        .map_err(|e| e.to_string())?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "claude exited with code {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let env: CliEnvelope =
+        serde_json::from_str(stdout.trim()).map_err(|e| format!("bad claude output: {e}"))?;
+    let cost = env.total_cost_usd.unwrap_or(0.0);
+    let result_text = env.result.unwrap_or_default();
+    let json = strip_fences(&result_text);
+    let resp: AiResp =
+        serde_json::from_str(json).map_err(|e| format!("could not parse update list: {e}"))?;
+    let updates = resp
+        .updates
+        .into_iter()
+        .filter(|u| !u.name.is_empty() && !u.latest.is_empty())
+        .map(|u| AiUpdate {
+            name: u.name,
+            current: u.current,
+            latest: u.latest,
+            url: u.url,
+        })
+        .collect();
+
+    Ok(AiCheckResult {
+        updates,
+        checked: apps.len(),
+        cost_usd: cost,
+        note,
+    })
+}
+
+/// Open an http(s) URL in the user's default browser.
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("refusing to open a non-http URL".into());
+    }
+    let script = format!("Start-Process '{}'", url.replace('\'', "''"));
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +450,23 @@ Visual Studio Build Tools 2022    Microsoft.VisualStudio.2022.Buil…   17.14.25
         // Ellipsis stripped from the truncated id.
         assert_eq!(ups[1].id, "Microsoft.VisualStudio.2022.Buil");
         assert_eq!(ups[1].current, "17.14.25 (January 2026)");
+    }
+
+    #[test]
+    fn unmanaged_apps_exclude_winget_managed_and_noise() {
+        let sample = "\
+Name                       Id                              Version       Available   Source
+-------------------------------------------------------------------------------------------
+7-Zip 25.01 (x64)          7zip.7zip                       25.01         26.01       winget
+Git                        ARP\\Machine\\X64\\Git_is1          2.52.0
+NVIDIA Graphics Driver     ARP\\Machine\\X64\\{B2FE1952}       596.49
+iCloud Outlook             ARP\\Machine\\X64\\{81FA1580}       15.7.0.56";
+        let apps = parse_unmanaged(sample);
+        // 7-Zip excluded (winget), NVIDIA Driver excluded (noise); Git + iCloud kept.
+        let names: Vec<&str> = apps.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"Git"));
+        assert!(names.contains(&"iCloud Outlook"));
+        assert!(!names.contains(&"7-Zip 25.01 (x64)"));
+        assert!(!names.iter().any(|n| n.contains("NVIDIA")));
     }
 }

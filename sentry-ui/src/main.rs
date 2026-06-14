@@ -252,7 +252,9 @@ fn main() {
             toggle_pause,
             updates::list_app_updates,
             updates::update_app,
-            updates::update_all_apps
+            updates::update_all_apps,
+            updates::check_ai_updates,
+            updates::open_url
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| error!("Sentry UI failed: {e}"))
