@@ -10,10 +10,12 @@
   ExecWait 'sc stop SentrySvc'
   ExecWait '"$INSTDIR\sentry-svc.exe" uninstall'
 
-  ; Copy default config if one does not already exist.
-  ; User must set claude_cli_path and user_profile before the service will work.
+  ; Seed config.toml from the bundled template on first install, then remove the
+  ; template so the install directory contains only the live config. The service
+  ; auto-detects the claude session, so the default config works as-is.
   IfFileExists "$INSTDIR\config.toml" +2
     CopyFiles /SILENT "$INSTDIR\config.toml.example" "$INSTDIR\config.toml"
+  Delete "$INSTDIR\config.toml.example"
 
   ; Register and start the service
   ExecWait '"$INSTDIR\sentry-svc.exe" install'
