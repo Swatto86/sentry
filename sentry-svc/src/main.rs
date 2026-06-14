@@ -10,7 +10,9 @@ mod safety;
 mod signals;
 
 use models::SignalSnapshot;
-use sentry_proto::{ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg};
+use sentry_proto::{
+    ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg, UsageSummary,
+};
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -166,6 +168,7 @@ struct SvcState {
     recent_executions: VecDeque<ExecutionSummary>,
     status: String,
     error: Option<String>,
+    usage: Option<UsageSummary>,
 }
 
 impl Default for SvcState {
@@ -181,6 +184,7 @@ impl Default for SvcState {
             recent_executions: VecDeque::new(),
             status: "Initializing".to_string(),
             error: None,
+            usage: None,
         }
     }
 }
@@ -198,7 +202,52 @@ fn build_status(st: &SvcState, pending: Option<ApprovalInfo>) -> StatusPayload {
         recent_executions: st.recent_executions.iter().cloned().collect(),
         pending_approval: pending,
         error: st.error.clone(),
+        usage: st.usage.clone(),
     }
+}
+
+/// Fingerprint of the *actionable* signals in a snapshot — error-level log
+/// events, warning/error Windows events, failed services, and resource
+/// thresholds. Returns None when nothing is worth analysing, so the decision
+/// loop can skip the Claude call (benign file writes and Information events are
+/// ignored). Identical fingerprints across cycles mean nothing changed.
+fn actionable_fingerprint(snap: &SignalSnapshot) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for fc in &snap.file_changes {
+        if let Some(le) = &fc.log_event {
+            if le.severity != "INFO" || !le.error_snippets.is_empty() {
+                parts.push(format!(
+                    "F|{}|{}|{}",
+                    le.log_path,
+                    le.severity,
+                    le.error_snippets.len()
+                ));
+            }
+        }
+    }
+    for e in &snap.event_log {
+        if e.level == "Error" || e.level == "Warning" {
+            parts.push(format!("E|{}|{}|{}", e.level, e.source, e.event_id));
+        }
+    }
+    let sys = &snap.system_state;
+    for s in &sys.failed_services {
+        parts.push(format!("S|{s}"));
+    }
+    if sys.cpu_usage_percent > 90.0 {
+        parts.push("CPU>90".into());
+    }
+    if sys.memory_usage_percent > 90.0 {
+        parts.push("MEM>90".into());
+    }
+    if sys.disk_usage_percent > 90.0 {
+        parts.push("DISK>90".into());
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.sort();
+    Some(parts.join("\n"))
 }
 
 fn push_problem(
@@ -318,6 +367,9 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
 
     st.status = "Active".to_string();
     st.error = None;
+    if let Ok(s) = audit::usage_summary(&db).await {
+        st.usage = Some(s);
+    }
     pipe.broadcast_status(build_status(&st, None));
 
     let mut ticker = interval(Duration::from_secs(cfg.monitoring.decision_interval_secs));
@@ -326,6 +378,8 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
         "Decision loop started"
     );
     let mut cycle_count = 0u64;
+    // Last analysed actionable-signal fingerprint; identical states are skipped.
+    let mut last_fingerprint: Option<String> = None;
 
     let shutdown = std::pin::pin!(shutdown);
     tokio::select! {
@@ -412,10 +466,47 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                 let feedback_summary =
                     feedback::recent_summary(&db, 10).await.unwrap_or_default();
 
+                // ── Skip the Claude call when nothing actionable changed ──────
+                // Benign file writes and Information events don't warrant a call,
+                // and an unchanged state was already analysed last cycle. This is
+                // the main lever on subscription usage.
+                let fingerprint = actionable_fingerprint(&snapshot);
+                match &fingerprint {
+                    None => {
+                        info!("No actionable signals — skipping Claude analysis");
+                        if !st.paused {
+                            st.status = "Active".to_string();
+                            st.error = None;
+                        }
+                        pipe.broadcast_status(build_status(&st, None));
+                        continue;
+                    }
+                    Some(fp) if last_fingerprint.as_deref() == Some(fp.as_str()) => {
+                        info!("Signals unchanged since last analysis — skipping");
+                        if !st.paused {
+                            st.status = "Active".to_string();
+                        }
+                        pipe.broadcast_status(build_status(&st, None));
+                        continue;
+                    }
+                    _ => {}
+                }
+
                 // ── Claude analysis ──────────────────────────────────────────
                 let claude_decision =
                     match ai.analyze(&snapshot, &history, Some(&feedback_summary)).await {
-                        Ok(d) => d,
+                        Ok((d, usage)) => {
+                            if let Some(u) = usage {
+                                if let Err(e) = audit::log_usage(&db, &u).await {
+                                    warn!("Failed to log usage: {e}");
+                                }
+                                match audit::usage_summary(&db).await {
+                                    Ok(s) => st.usage = Some(s),
+                                    Err(e) => warn!("Failed to compute usage summary: {e}"),
+                                }
+                            }
+                            d
+                        }
                         Err(e) => {
                             error!("Claude analysis failed: {e}");
                             st.status = "Error".to_string();
@@ -424,6 +515,9 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             continue;
                         }
                     };
+
+                // Remember this state so an identical one is skipped next cycle.
+                last_fingerprint = fingerprint;
 
                 st.last_analysis = claude_decision.analysis.clone();
                 st.error         = None;

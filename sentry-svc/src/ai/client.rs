@@ -1,5 +1,5 @@
 use crate::config::{ApiConfig, ApiProvider};
-use crate::models::{ClaudeDecision, PastDecision, SignalSnapshot};
+use crate::models::{CallUsage, ClaudeDecision, PastDecision, SignalSnapshot};
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -60,6 +60,23 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
+}
+
+// ── Claude CLI JSON envelope (claude --print --output-format json) ────────────
+
+#[derive(Deserialize)]
+struct ClaudeCliResult {
+    result: Option<String>,
+    total_cost_usd: Option<f64>,
+    usage: Option<ClaudeCliUsage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeCliUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -139,20 +156,21 @@ impl AiClient {
         snapshot: &SignalSnapshot,
         history: &[PastDecision],
         feedback_summary: Option<&str>,
-    ) -> Result<ClaudeDecision> {
+    ) -> Result<(ClaudeDecision, Option<CallUsage>)> {
         let prompt = crate::ai::prompt::build(snapshot, history, feedback_summary);
-        let raw = match &self.config {
+        let (raw, usage) = match &self.config {
             AiClientConfig::Anthropic { api_key, model } => {
-                self.call_anthropic(api_key, model, &prompt).await?
+                (self.call_anthropic(api_key, model, &prompt).await?, None)
             }
             AiClientConfig::OpenAiCompatible {
                 base_url,
                 api_key,
                 model,
-            } => {
+            } => (
                 self.call_openai_compatible(base_url, api_key, model, &prompt)
-                    .await?
-            }
+                    .await?,
+                None,
+            ),
             AiClientConfig::ClaudeCli {
                 binary,
                 model,
@@ -178,7 +196,7 @@ impl AiClient {
             "Claude analysis complete"
         );
 
-        Ok(decision)
+        Ok((decision, usage))
     }
 
     // ── Anthropic native (/v1/messages) ──────────────────────────────────────
@@ -328,9 +346,10 @@ impl AiClient {
         model: &str,
         user_profile: Option<&str>,
         prompt: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<CallUsage>)> {
         let mut cmd = tokio::process::Command::new(binary);
-        cmd.arg("--print");
+        // JSON output gives us the response text plus token/cost usage.
+        cmd.args(["--print", "--output-format", "json"]);
         if !model.is_empty() {
             cmd.args(["--model", model]);
         }
@@ -382,12 +401,30 @@ impl AiClient {
             );
         }
 
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if text.is_empty() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
             bail!("claude CLI returned empty output");
         }
 
-        Ok(text)
+        // Parse the JSON envelope: { result, total_cost_usd, usage: {...} }.
+        // Fall back to treating stdout as raw text if it isn't the expected shape.
+        match serde_json::from_str::<ClaudeCliResult>(&stdout) {
+            Ok(env) => {
+                let text = env.result.unwrap_or_default();
+                if text.trim().is_empty() {
+                    bail!("claude CLI returned an empty result");
+                }
+                let usage = env.usage.map(|u| CallUsage {
+                    input_tokens: u.input_tokens.unwrap_or(0),
+                    output_tokens: u.output_tokens.unwrap_or(0),
+                    cache_creation: u.cache_creation_input_tokens.unwrap_or(0),
+                    cache_read: u.cache_read_input_tokens.unwrap_or(0),
+                    cost_usd: env.total_cost_usd.unwrap_or(0.0),
+                });
+                Ok((text, usage))
+            }
+            Err(_) => Ok((stdout, None)),
+        }
     }
 }
 

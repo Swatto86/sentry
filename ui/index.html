@@ -127,6 +127,13 @@
     .services-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; }
     .svc-chip { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: color-mix(in srgb, var(--red) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 30%, transparent); color: var(--red); }
 
+    /* ── Usage ── */
+    .usage-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 20px; padding: 12px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
+    .usage-grid .usage-h { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; text-align: right; }
+    .usage-grid .usage-l { color: var(--muted); }
+    .usage-grid .usage-v { text-align: right; }
+    .usage-note { padding: 0 14px 12px; font-size: 11px; color: var(--muted); }
+
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -198,6 +205,12 @@
   <div class="analysis-card">
     <div class="card-header">Last Analysis</div>
     <div class="analysis-text" id="analysis-text">Waiting for first analysis cycle…</div>
+  </div>
+
+  <!-- Claude usage -->
+  <div class="card" id="usage-card" style="display:none">
+    <div class="card-header">Claude Usage</div>
+    <div class="card-body" id="usage-body"></div>
   </div>
 
 </div>
