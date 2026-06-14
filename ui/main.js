@@ -251,6 +251,50 @@ document.getElementById('updates-list').addEventListener('click', (e) => {
   if (b) updateOne(b.dataset.id, b);
 });
 
+// ── Other updates (AI-checked) ──────────────────────────────────────────────
+
+let aiBusy = false;
+
+async function checkAiUpdates() {
+  if (aiBusy) return;
+  aiBusy = true;
+  const list = document.getElementById('ai-updates-list');
+  const countEl = document.getElementById('ai-updates-count');
+  const btn = document.getElementById('ai-check-btn');
+  btn.disabled = true; btn.textContent = 'Checking…';
+  list.innerHTML = '<div class="empty">Asking AI to check the web for newer versions… this can take a minute.</div>';
+  try {
+    const r = await invoke('check_ai_updates');
+    const cost = `Checked ${r.checked} app${r.checked === 1 ? '' : 's'} · ~$${r.cost_usd.toFixed(2)}`;
+    countEl.textContent = r.updates.length ? `(${r.updates.length})` : '';
+    let html = '';
+    if (r.note) html += `<div class="upd-note">${esc(r.note)}</div>`;
+    if (!r.updates.length) {
+      html += '<div class="empty">No updates found for non-winget apps.</div>';
+    } else {
+      html += r.updates.map(u => `
+        <div class="upd-row">
+          <span class="upd-name" title="${esc(u.name)}">${esc(u.name)}</span>
+          <span class="upd-ver">${esc(u.current || '?')} → ${esc(u.latest)}</span>
+          ${u.url ? `<button class="upd-dl" data-url="${esc(u.url)}">Download</button>` : ''}
+        </div>`).join('');
+    }
+    html += `<div class="upd-note">${esc(cost)} · AI-checked — verify before installing.</div>`;
+    list.innerHTML = html;
+  } catch (e) {
+    list.innerHTML = `<div class="empty">${esc(String(e))}</div>`;
+    countEl.textContent = '';
+  }
+  aiBusy = false;
+  btn.disabled = false; btn.textContent = 'Check other apps';
+}
+
+document.getElementById('ai-check-btn').addEventListener('click', checkAiUpdates);
+document.getElementById('ai-updates-list').addEventListener('click', (e) => {
+  const b = e.target.closest('.upd-dl');
+  if (b) invoke('open_url', { url: b.dataset.url }).catch(err => console.error(err));
+});
+
 // Initial load + poll every 2 seconds
 refresh();
 setInterval(refresh, 2000);

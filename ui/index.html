@@ -143,6 +143,10 @@
     .upd-update:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); }
     .upd-update:disabled { opacity: .5; cursor: default; }
 
+    .upd-note { padding: 6px 14px 0; font-size: 11px; color: var(--muted); }
+    .upd-dl { padding: 3px 12px; border: 1px solid var(--green); background: transparent; color: var(--green); border-radius: 6px; cursor: pointer; font-size: 11px; }
+    .upd-dl:hover { background: color-mix(in srgb, var(--green) 14%, transparent); }
+
     /* ── Usage ── */
     .usage-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 20px; padding: 12px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
     .usage-grid .usage-h { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; text-align: right; }
@@ -221,6 +225,18 @@
     </div>
     <div class="card-body" id="updates-list">
       <div class="empty">Checking for updates…</div>
+    </div>
+  </div>
+
+  <!-- Other updates (AI-checked, apps winget can't manage) -->
+  <div class="card" id="ai-updates-card">
+    <div class="card-header">
+      Other Updates <span class="upd-count" id="ai-updates-count"></span>
+      <span class="hspacer"></span>
+      <button class="upd-btn" id="ai-check-btn">Check other apps</button>
+    </div>
+    <div class="card-body" id="ai-updates-list">
+      <div class="empty">Apps not covered by winget — click “Check other apps” (uses a little AI).</div>
     </div>
   </div>
 
