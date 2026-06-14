@@ -131,6 +131,26 @@ pub fn save(config: &Config, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Resolve a path relative to the executable's directory (not cwd).
+/// Absolute paths are returned unchanged.
+pub fn resolve(rel: &str) -> std::path::PathBuf {
+    let p = std::path::PathBuf::from(rel);
+    if p.is_absolute() {
+        return p;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(rel)))
+        .unwrap_or(p)
+}
+
+pub fn load(path: &str) -> Result<Config> {
+    let resolved = resolve(path);
+    let contents = fs::read_to_string(&resolved)
+        .with_context(|| format!("Failed to read config file: {}", resolved.display()))?;
+    toml::from_str(&contents).with_context(|| "Failed to parse config TOML")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,24 +196,4 @@ audit_db = "./sentry.db"
         // Blank api key keeps the prior value (None here).
         assert!(reparsed.api.anthropic_api_key.is_none());
     }
-}
-
-/// Resolve a path relative to the executable's directory (not cwd).
-/// Absolute paths are returned unchanged.
-pub fn resolve(rel: &str) -> std::path::PathBuf {
-    let p = std::path::PathBuf::from(rel);
-    if p.is_absolute() {
-        return p;
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(rel)))
-        .unwrap_or(p)
-}
-
-pub fn load(path: &str) -> Result<Config> {
-    let resolved = resolve(path);
-    let contents = fs::read_to_string(&resolved)
-        .with_context(|| format!("Failed to read config file: {}", resolved.display()))?;
-    toml::from_str(&contents).with_context(|| "Failed to parse config TOML")
 }
