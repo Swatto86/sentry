@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod pipe_client;
+mod updates;
 
 use pipe_client::SharedStatus;
 use sentry_proto::{StatusPayload, UiMsg};
@@ -248,7 +249,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_status,
             decide_approval,
-            toggle_pause
+            toggle_pause,
+            updates::list_app_updates,
+            updates::update_app,
+            updates::update_all_apps
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| error!("Sentry UI failed: {e}"))

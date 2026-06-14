@@ -127,6 +127,22 @@
     .services-list { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px; }
     .svc-chip { font-size: 11px; padding: 2px 8px; border-radius: 4px; background: color-mix(in srgb, var(--red) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--red) 30%, transparent); color: var(--red); }
 
+    /* ── Available updates ── */
+    #updates-card .card-header { display: flex; align-items: center; gap: 8px; }
+    .upd-count { color: var(--blue); font-weight: 600; }
+    .card-header .hspacer { flex: 1; }
+    .upd-btn { padding: 3px 10px; border: 1px solid var(--border); background: transparent; color: var(--text); border-radius: 6px; cursor: pointer; font-size: 11px; text-transform: none; letter-spacing: 0; }
+    .upd-btn:hover { background: var(--border); }
+    .upd-btn:disabled { opacity: .5; cursor: default; }
+    .upd-all { border-color: var(--green); color: var(--green); }
+    .upd-row { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+    .upd-row:last-child { border-bottom: none; }
+    .upd-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .upd-ver { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .upd-update { padding: 3px 12px; border: 1px solid var(--blue); background: transparent; color: var(--blue); border-radius: 6px; cursor: pointer; font-size: 11px; }
+    .upd-update:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); }
+    .upd-update:disabled { opacity: .5; cursor: default; }
+
     /* ── Usage ── */
     .usage-grid { display: grid; grid-template-columns: 1fr auto auto; gap: 6px 20px; padding: 12px 14px; font-size: 13px; font-variant-numeric: tabular-nums; }
     .usage-grid .usage-h { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; text-align: right; }
@@ -192,6 +208,19 @@
       <div class="card-body" id="executions-list">
         <div class="empty">No executions yet</div>
       </div>
+    </div>
+  </div>
+
+  <!-- Available app updates -->
+  <div class="card" id="updates-card">
+    <div class="card-header">
+      Available Updates <span class="upd-count" id="updates-count"></span>
+      <span class="hspacer"></span>
+      <button class="upd-btn" id="upd-refresh">Refresh</button>
+      <button class="upd-btn upd-all" id="upd-all" style="display:none">Update all</button>
+    </div>
+    <div class="card-body" id="updates-list">
+      <div class="empty">Checking for updates…</div>
     </div>
   </div>
 
