@@ -360,7 +360,7 @@ struct AiUpdateRaw {
 }
 
 /// On-demand: ask Claude (with web lookup) for updates to apps winget can't
-/// manage. `model` is the Claude model to use (empty = CLI default).
+/// manage. `model` is the Claude model to use (empty = Haiku).
 #[tauri::command]
 pub async fn check_ai_updates(model: String) -> Result<AiCheckResult, String> {
     // 1. Apps winget can't manage.
@@ -471,9 +471,11 @@ async fn run_claude_check(prompt: String, model: &str) -> Result<(Vec<AiUpdate>,
     let binary = claude_binary();
     let mut std_cmd = std::process::Command::new(&binary);
     std_cmd.args(["--print", "--output-format", "json"]);
-    if !model.trim().is_empty() {
-        std_cmd.args(["--model", model.trim()]);
-    }
+    // The app-update check needs live web search, so it must run on a Claude
+    // model. Default to Haiku — the cheapest Claude model — when the field is
+    // left blank, rather than inheriting the CLI's (often pricier) default.
+    let model = if model.trim().is_empty() { "haiku" } else { model.trim() };
+    std_cmd.args(["--model", model]);
     std_cmd.creation_flags(CREATE_NO_WINDOW);
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.kill_on_drop(true)

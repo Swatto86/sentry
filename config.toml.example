@@ -10,6 +10,12 @@ provider = "claude_cli"
 # claude_cli_path = "C:\\Users\\YourName\\.local\\bin\\claude.exe"
 model = ""   # leave empty to use the CLI's configured default, or set e.g. "claude-opus-4-8"
 
+# Model for the on-demand "Other Updates" app check. This always runs through the
+# Claude CLI (it needs live web search), so it must be a Claude model — sonnet,
+# haiku, or opus. Free/OpenRouter models can't be used here. Blank = haiku (the
+# cheapest). Also editable in the app's Settings panel.
+update_check_model = "haiku"
+
 # ── Option B: Anthropic native API ────────────────────────────────────────────
 # provider = "anthropic"
 # anthropic_api_key = "sk-ant-..."
