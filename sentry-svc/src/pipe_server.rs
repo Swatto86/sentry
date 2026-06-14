@@ -1,6 +1,7 @@
 use sentry_proto::{ServiceMsg, StatusPayload, UiMsg, PIPE_NAME};
 use std::{
     collections::HashMap,
+    ffi::c_void,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -13,6 +14,38 @@ use tokio::{
     time::Duration,
 };
 use tracing::{info, warn};
+use windows::core::PCWSTR;
+use windows::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+
+/// Build a security descriptor that lets the interactive (non-elevated) UI reach
+/// the pipe. A pipe created by the LocalSystem service otherwise only grants
+/// SYSTEM and Administrators, so the UI fails to open it with "Access is denied".
+///
+/// Grants SYSTEM and Administrators full control, and Authenticated Users
+/// read + write (the UI must both receive status and send commands/approvals).
+/// Returns the descriptor pointer as a `usize` so it can be carried across the
+/// listener's `.await` points (a raw pointer is not `Send`). The descriptor is
+/// intentionally leaked so the pointer stays valid for the life of the service.
+fn build_pipe_security_descriptor() -> Option<usize> {
+    let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut psd = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut psd,
+            None,
+        )
+    }
+    .ok()?;
+    Some(psd.0 as usize)
+}
 
 type Approvals = Arc<Mutex<HashMap<u64, oneshot::Sender<bool>>>>;
 
@@ -44,13 +77,36 @@ async fn listener_task(
     ui_cmd_tx: mpsc::Sender<UiMsg>,
     approvals: Approvals,
 ) {
+    let sd_ptr = build_pipe_security_descriptor();
+    if sd_ptr.is_none() {
+        warn!("Could not build pipe security descriptor; the UI may be unable to connect");
+    }
+
     let mut first = true;
     loop {
-        let server = match ServerOptions::new()
-            .first_pipe_instance(first)
-            .pipe_mode(PipeMode::Byte)
-            .create(PIPE_NAME)
-        {
+        // Construct the SECURITY_ATTRIBUTES in a scope that ends before the first
+        // .await below, so the non-Send raw pointer is never held across an await.
+        let created = {
+            let mut opts = ServerOptions::new();
+            opts.first_pipe_instance(first).pipe_mode(PipeMode::Byte);
+            match sd_ptr {
+                Some(p) => {
+                    let mut sa = SECURITY_ATTRIBUTES {
+                        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                        lpSecurityDescriptor: p as *mut c_void,
+                        bInheritHandle: false.into(),
+                    };
+                    unsafe {
+                        opts.create_with_security_attributes_raw(
+                            PIPE_NAME,
+                            (&mut sa as *mut SECURITY_ATTRIBUTES).cast::<c_void>(),
+                        )
+                    }
+                }
+                None => opts.create(PIPE_NAME),
+            }
+        };
+        let server = match created {
             Ok(s) => {
                 first = false;
                 s
