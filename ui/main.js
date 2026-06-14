@@ -183,6 +183,78 @@ async function decide(approved) {
   card.style.display = 'none';
 }
 
+// ── Available app updates (winget) ──────────────────────────────────────────
+
+let updatesBusy = false;
+
+async function loadUpdates() {
+  const list = document.getElementById('updates-list');
+  const countEl = document.getElementById('updates-count');
+  const allBtn = document.getElementById('upd-all');
+  if (updatesBusy) return;
+  try {
+    const ups = await invoke('list_app_updates');
+    countEl.textContent = ups.length ? `(${ups.length})` : '';
+    allBtn.style.display = ups.length ? 'inline-block' : 'none';
+    if (!ups.length) {
+      list.innerHTML = '<div class="empty">All apps up to date</div>';
+      return;
+    }
+    list.innerHTML = ups.map(u => `
+      <div class="upd-row">
+        <span class="upd-name" title="${esc(u.id)}">${esc(u.name)}</span>
+        <span class="upd-ver">${esc(u.current)} → ${esc(u.available)}</span>
+        <button class="upd-update" data-id="${esc(u.id)}">Update</button>
+      </div>`).join('');
+  } catch (e) {
+    list.innerHTML = `<div class="empty">${esc(String(e))}</div>`;
+    countEl.textContent = '';
+    allBtn.style.display = 'none';
+  }
+}
+
+async function updateOne(id, btn) {
+  if (updatesBusy) return;
+  updatesBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
+  try {
+    await invoke('update_app', { id });
+  } catch (e) {
+    if (btn) btn.textContent = 'Failed';
+    console.error('update_app failed', e);
+    updatesBusy = false;
+    return;
+  }
+  updatesBusy = false;
+  loadUpdates();
+}
+
+async function updateAll() {
+  if (updatesBusy) return;
+  updatesBusy = true;
+  const btn = document.getElementById('upd-all');
+  btn.disabled = true; btn.textContent = 'Updating…';
+  try {
+    await invoke('update_all_apps');
+  } catch (e) {
+    console.error('update_all_apps failed', e);
+  }
+  updatesBusy = false;
+  btn.disabled = false; btn.textContent = 'Update all';
+  loadUpdates();
+}
+
+document.getElementById('upd-refresh').addEventListener('click', loadUpdates);
+document.getElementById('upd-all').addEventListener('click', updateAll);
+document.getElementById('updates-list').addEventListener('click', (e) => {
+  const b = e.target.closest('.upd-update');
+  if (b) updateOne(b.dataset.id, b);
+});
+
 // Initial load + poll every 2 seconds
 refresh();
 setInterval(refresh, 2000);
+
+// Check for app updates on launch, then hourly
+loadUpdates();
+setInterval(loadUpdates, 60 * 60 * 1000);
