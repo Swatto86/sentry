@@ -341,7 +341,9 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     st.settings = Some(cfg.to_ui_settings());
 
     let pol = match policy::ExecutionPolicy::load(
-        config::resolve("policy.toml").to_str().unwrap_or("policy.toml"),
+        config::resolve("policy.toml")
+            .to_str()
+            .unwrap_or("policy.toml"),
     ) {
         Ok(p) => p,
         Err(e) => fatal!(format!("policy.toml: {e}")),
@@ -365,7 +367,9 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
         Err(e) => {
             error!("AI client init failed: {e}");
             st.status = "Error".to_string();
-            st.error = Some(format!("AI provider not configured: {e} — fix it in Settings"));
+            st.error = Some(format!(
+                "AI provider not configured: {e} — fix it in Settings"
+            ));
             None
         }
     };
@@ -411,12 +415,13 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     tokio::select! {
         _ = async {
             loop {
-                ticker.tick().await;
-                cycle_count += 1;
-
-                // Handle pending UI commands
-                while let Ok(cmd) = ui_rx.try_recv() {
-                    match cmd {
+                // Wait for either the next decision tick or a UI command. Commands
+                // are handled as they arrive — not once per decision interval — so
+                // Pause and settings changes respond promptly.
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    Some(cmd) = ui_rx.recv() => {
+                        match cmd {
                         UiMsg::TogglePause => {
                             st.paused = !st.paused;
                             st.status = if st.paused {
@@ -458,8 +463,11 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             }
                         }
                         UiMsg::Approve { .. } => {} // resolved in pipe_server
+                        }
+                        continue;
                     }
                 }
+                cycle_count += 1;
 
                 // Re-discover log directories every 20 cycles
                 if cycle_count.is_multiple_of(20) {

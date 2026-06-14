@@ -249,9 +249,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Service awaits approval for id = 7.
-        let handle = tokio::spawn(async move {
-            srv.request_approval(7, StatusPayload::default()).await
-        });
+        let handle =
+            tokio::spawn(async move { srv.request_approval(7, StatusPayload::default()).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Client sends exactly what the UI serialises for UiMsg::Approve.

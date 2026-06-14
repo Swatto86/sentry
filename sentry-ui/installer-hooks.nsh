@@ -3,6 +3,11 @@
 ; The installer runs with administrator privileges (installMode = perMachine).
 
 !macro NSIS_HOOK_PREINSTALL
+  ; Stop the running service BEFORE files are written — Windows can't replace
+  ; sentry-svc.exe while it's running (this is what broke auto-updates). Give it
+  ; a few seconds to exit and release the file handle.
+  ExecWait 'sc stop SentrySvc'
+  Sleep 5000
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

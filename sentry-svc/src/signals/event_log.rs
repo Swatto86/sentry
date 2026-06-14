@@ -131,7 +131,9 @@ fn read_channel_since(channel: &str, last_record: u32) -> (Vec<EventLogEntry>, u
         }
     }
 
-    unsafe { let _ = CloseEventLog(handle); }
+    unsafe {
+        let _ = CloseEventLog(handle);
+    }
     (entries, new_max_record)
 }
 

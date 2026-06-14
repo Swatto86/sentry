@@ -360,9 +360,9 @@ struct AiUpdateRaw {
 }
 
 /// On-demand: ask Claude (with web lookup) for updates to apps winget can't
-/// manage. Returns the found updates plus the equivalent cost of this check.
+/// manage. `model` is the Claude model to use (empty = CLI default).
 #[tauri::command]
-pub async fn check_ai_updates() -> Result<AiCheckResult, String> {
+pub async fn check_ai_updates(model: String) -> Result<AiCheckResult, String> {
     // 1. Apps winget can't manage.
     let list_out = tokio::task::spawn_blocking(|| {
         std::process::Command::new("winget")
@@ -416,11 +416,65 @@ Omit apps that are already current or that you cannot verify. Only include real,
 INSTALLED APPS:\n{app_lines}"
     );
 
+    let (updates, cost) = run_claude_check(prompt, &model).await?;
+    Ok(AiCheckResult {
+        updates,
+        checked: apps.len(),
+        cost_usd: cost,
+        note,
+    })
+}
+
+/// Re-check a single app (using its stored note) — cheaper than a full sweep.
+#[tauri::command]
+pub async fn check_app_update(
+    name: String,
+    current: String,
+    model: String,
+) -> Result<AiCheckResult, String> {
+    let notes = load_notes();
+    let key = name.to_lowercase();
+    if notes.get(&key).map(|x| x.ignore).unwrap_or(false) {
+        return Ok(AiCheckResult {
+            updates: vec![],
+            checked: 1,
+            cost_usd: 0.0,
+            note: Some(format!("{name} is on your ignore list.")),
+        });
+    }
+    let note_line = match notes.get(&key) {
+        Some(x) if !x.note.is_empty() => format!(" [user note: {}]", x.note),
+        _ => String::new(),
+    };
+    let prompt = format!(
+        "You are an application update checker. Use web search to find the latest STABLE release of \
+the Windows app below from its official source, and report whether a newer version exists.\n\n\
+Respect any [user note]: it may say the app is custom/self-built or give its real release source — \
+follow it and do NOT report an update that contradicts the note.\n\n\
+Respond ONLY with JSON, no markdown:\n\
+{{\"updates\":[{{\"name\":\"{name}\",\"current\":\"<installed>\",\"latest\":\"<newer version>\",\"url\":\"<official download or releases page URL>\"}}]}}\n\
+Return an empty updates array if it is already current or you cannot verify a newer version.\n\n\
+APP: {name} ({current}){note_line}"
+    );
+    let (updates, cost) = run_claude_check(prompt, &model).await?;
+    Ok(AiCheckResult {
+        updates,
+        checked: 1,
+        cost_usd: cost,
+        note: None,
+    })
+}
+
+/// Spawn `claude --print --output-format json` with the given prompt and model,
+/// parse the result, and return the found updates plus the call's USD cost.
+async fn run_claude_check(prompt: String, model: &str) -> Result<(Vec<AiUpdate>, f64), String> {
     let binary = claude_binary();
     let mut std_cmd = std::process::Command::new(&binary);
-    std_cmd
-        .args(["--print", "--output-format", "json"])
-        .creation_flags(CREATE_NO_WINDOW);
+    std_cmd.args(["--print", "--output-format", "json"]);
+    if !model.trim().is_empty() {
+        std_cmd.args(["--model", model.trim()]);
+    }
+    std_cmd.creation_flags(CREATE_NO_WINDOW);
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.kill_on_drop(true)
         .stdin(std::process::Stdio::piped())
@@ -465,13 +519,31 @@ INSTALLED APPS:\n{app_lines}"
             url: u.url,
         })
         .collect();
+    Ok((updates, cost))
+}
 
-    Ok(AiCheckResult {
-        updates,
-        checked: apps.len(),
-        cost_usd: cost,
-        note,
+/// Current USD→GBP rate for displaying costs in pounds. Fetched (cached by the
+/// caller) with a sensible fallback if offline.
+#[tauri::command]
+pub async fn gbp_per_usd() -> Result<f64, String> {
+    let rate = tokio::task::spawn_blocking(|| {
+        let out = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "try { (Invoke-RestMethod -Uri 'https://open.er-api.com/v6/latest/USD' -TimeoutSec 8).rates.GBP } catch { '' }",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        out.ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|r| *r > 0.1 && *r < 5.0)
+            .unwrap_or(0.79)
     })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rate)
 }
 
 /// Open an http(s) URL in the user's default browser.

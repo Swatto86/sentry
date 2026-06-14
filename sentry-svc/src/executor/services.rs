@@ -39,13 +39,17 @@ pub fn stop(name: &str) -> Result<String> {
             let r = unsafe { ControlService(h, SERVICE_CONTROL_STOP, &mut status) }
                 .map(|_| format!("Stop signal sent to '{name}'"))
                 .map_err(|e| anyhow::anyhow!("ControlService failed: {e}"));
-            unsafe { let _ = CloseServiceHandle(h); }
+            unsafe {
+                let _ = CloseServiceHandle(h);
+            }
             r
         }
         Err(e) => Err(anyhow::anyhow!("Cannot open service '{name}': {e}")),
     };
 
-    unsafe { let _ = CloseServiceHandle(manager); }
+    unsafe {
+        let _ = CloseServiceHandle(manager);
+    }
     result
 }
 
@@ -60,13 +64,17 @@ pub fn start(name: &str) -> Result<String> {
             let r = unsafe { StartServiceW(h, None) }
                 .map(|_| format!("Start issued for '{name}'"))
                 .map_err(|e| anyhow::anyhow!("StartServiceW failed: {e}"));
-            unsafe { let _ = CloseServiceHandle(h); }
+            unsafe {
+                let _ = CloseServiceHandle(h);
+            }
             r
         }
         Err(e) => Err(anyhow::anyhow!("Cannot open service '{name}': {e}")),
     };
 
-    unsafe { let _ = CloseServiceHandle(manager); }
+    unsafe {
+        let _ = CloseServiceHandle(manager);
+    }
     result
 }
 
@@ -75,10 +83,13 @@ fn wait_for(name: &str, target: SERVICE_STATUS_CURRENT_STATE, timeout_secs: u64)
     let name_w = wide(name);
     let manager = unsafe { OpenSCManagerW(PCWSTR::null(), PCWSTR::null(), SC_MANAGER_CONNECT)? };
 
-    let svc = match unsafe { OpenServiceW(manager, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS) } {
+    let svc = match unsafe { OpenServiceW(manager, PCWSTR(name_w.as_ptr()), SERVICE_QUERY_STATUS) }
+    {
         Ok(h) => h,
         Err(e) => {
-            unsafe { let _ = CloseServiceHandle(manager); }
+            unsafe {
+                let _ = CloseServiceHandle(manager);
+            }
             return Err(anyhow::anyhow!("Cannot open service '{name}': {e}"));
         }
     };
@@ -92,7 +103,9 @@ fn wait_for(name: &str, target: SERVICE_STATUS_CURRENT_STATE, timeout_secs: u64)
             bail!("Timed out waiting for service '{name}' to reach state {target:?}");
         }
         let mut status = SERVICE_STATUS::default();
-        unsafe { let _ = QueryServiceStatus(svc, &mut status); }
+        unsafe {
+            let _ = QueryServiceStatus(svc, &mut status);
+        }
         if status.dwCurrentState == target {
             break;
         }

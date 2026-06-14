@@ -164,6 +164,8 @@
     .usage-grid .usage-v { text-align: right; }
     .usage-note { padding: 0 14px 12px; font-size: 11px; color: var(--muted); }
 
+    .model-label { font-size: 11px; color: var(--muted); margin-right: 10px; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
     /* ── Collapsible cards ── */
     .card-header.collapsible, .analysis-card .card-header { cursor: pointer; user-select: none; }
     .chev { display: inline-block; width: 10px; margin-right: 6px; color: var(--muted); font-size: 10px; transition: transform .15s; }
@@ -191,6 +193,7 @@
   <h1>Sentry</h1>
   <span id="status-text">Initializing…</span>
   <div class="spacer"></div>
+  <span id="model-label" class="model-label"></span>
   <button class="btn" id="pause-btn">Pause</button>
 </header>
 
@@ -300,6 +303,8 @@
         </select>
         <label for="set-model">Model</label>
         <input id="set-model" type="text" placeholder="nvidia/nemotron-3-super-120b-a12b:free">
+        <label for="set-upd-model">App-update model</label>
+        <input id="set-upd-model" type="text" placeholder="Claude model for 'Other Updates' (blank = default)">
         <label for="set-or-key">OpenRouter key</label>
         <input id="set-or-key" type="password" autocomplete="off">
         <label for="set-an-key">Anthropic key</label>
