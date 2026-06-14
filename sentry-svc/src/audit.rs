@@ -1,6 +1,7 @@
-use crate::models::{ClaudeDecision, ExecutionResult, PastDecision, SignalSnapshot};
+use crate::models::{CallUsage, ClaudeDecision, ExecutionResult, PastDecision, SignalSnapshot};
 use anyhow::Result;
 use chrono::Utc;
+use sentry_proto::UsageSummary;
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use std::str::FromStr;
 use tracing::info;
@@ -113,6 +114,58 @@ pub async fn get_recent_decisions(pool: &SqlitePool, limit: i64) -> Result<Vec<P
     }
 
     Ok(decisions)
+}
+
+pub async fn log_usage(pool: &SqlitePool, usage: &CallUsage) -> Result<()> {
+    let ts = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO usage_log
+         (timestamp, input_tokens, output_tokens, cache_creation, cache_read, cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&ts)
+    .bind(usage.input_tokens as i64)
+    .bind(usage.output_tokens as i64)
+    .bind(usage.cache_creation as i64)
+    .bind(usage.cache_read as i64)
+    .bind(usage.cost_usd)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Aggregate Claude usage over the last 24 hours and 7 days.
+pub async fn usage_summary(pool: &SqlitePool) -> Result<UsageSummary> {
+    async fn agg(pool: &SqlitePool, cutoff: &str) -> Result<(u64, u64, f64)> {
+        let row = sqlx::query(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(input_tokens + output_tokens + cache_creation + cache_read), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_log WHERE timestamp > ?",
+        )
+        .bind(cutoff)
+        .fetch_one(pool)
+        .await?;
+        let calls: i64 = row.try_get(0)?;
+        let tokens: i64 = row.try_get(1)?;
+        let cost: f64 = row.try_get(2)?;
+        Ok((calls as u64, tokens as u64, cost))
+    }
+
+    let now = Utc::now();
+    let day_cutoff = (now - chrono::Duration::hours(24)).to_rfc3339();
+    let week_cutoff = (now - chrono::Duration::days(7)).to_rfc3339();
+    let (calls_today, tokens_today, cost_today_usd) = agg(pool, &day_cutoff).await?;
+    let (calls_week, tokens_week, cost_week_usd) = agg(pool, &week_cutoff).await?;
+
+    Ok(UsageSummary {
+        calls_today,
+        calls_week,
+        tokens_today,
+        tokens_week,
+        cost_today_usd,
+        cost_week_usd,
+    })
 }
 
 pub async fn log_execution(

@@ -15,6 +15,21 @@ pub struct StatusPayload {
     pub recent_executions: Vec<ExecutionSummary>,
     pub pending_approval: Option<ApprovalInfo>,
     pub error: Option<String>,
+    /// Claude usage totals (claude_cli provider only); None when unavailable.
+    pub usage: Option<UsageSummary>,
+}
+
+/// Aggregated Claude usage, surfaced in the UI so the user can see how much of
+/// their subscription Sentry is consuming. Cost is the equivalent pay-as-you-go
+/// API cost reported by the CLI — not a subscription charge.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct UsageSummary {
+    pub calls_today: u64,
+    pub calls_week: u64,
+    pub tokens_today: u64,
+    pub tokens_week: u64,
+    pub cost_today_usd: f64,
+    pub cost_week_usd: f64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -168,3 +168,13 @@ pub struct ClaudeDecision {
     pub analysis: String,
     pub problems: Vec<Problem>,
 }
+
+/// Token + cost usage for a single Claude call (claude_cli provider).
+#[derive(Debug, Clone, Default)]
+pub struct CallUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation: u64,
+    pub cache_read: u64,
+    pub cost_usd: f64,
+}

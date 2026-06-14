@@ -77,6 +77,30 @@ function esc(s) {
     .replace(/>/g, '&gt;');
 }
 
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function renderUsage(u) {
+  const card = document.getElementById('usage-card');
+  if (!u) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  document.getElementById('usage-body').innerHTML = `
+    <div class="usage-grid">
+      <div></div><div class="usage-h">Last 24h</div><div class="usage-h">Last 7 days</div>
+      <div class="usage-l">Calls</div>
+      <div class="usage-v">${u.calls_today}</div><div class="usage-v">${u.calls_week}</div>
+      <div class="usage-l">Tokens</div>
+      <div class="usage-v">${fmtTokens(u.tokens_today)}</div><div class="usage-v">${fmtTokens(u.tokens_week)}</div>
+      <div class="usage-l">Equiv. cost</div>
+      <div class="usage-v">$${u.cost_today_usd.toFixed(2)}</div><div class="usage-v">$${u.cost_week_usd.toFixed(2)}</div>
+    </div>
+    <div class="usage-note">Equivalent pay-as-you-go API cost — covered by your subscription, not a separate charge.</div>
+  `;
+}
+
 async function refresh() {
   let status;
   try { status = await invoke('get_status'); }
@@ -142,6 +166,9 @@ async function refresh() {
   // Analysis
   const analysis = document.getElementById('analysis-text');
   analysis.textContent = status.last_analysis || 'Waiting for first analysis cycle…';
+
+  // Usage
+  renderUsage(status.usage);
 }
 
 async function togglePause() {
