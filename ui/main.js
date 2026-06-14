@@ -1,5 +1,14 @@
 const invoke = window.__TAURI__.core.invoke;
 
+// The app-update check needs live web search, so it always runs on a Claude
+// model. Mirror the backend: blank or a non-Claude id resolves to "haiku".
+function effectiveUpdateModel(model) {
+  const m = (model || '').trim();
+  const lower = m.toLowerCase();
+  const isClaude = ['haiku', 'sonnet', 'opus'].includes(lower) || lower.startsWith('claude');
+  return isClaude ? m : 'haiku';
+}
+
 const STATUS_COLORS = {
   Active:               'var(--green)',
   Warning:              'var(--yellow)',
@@ -135,9 +144,7 @@ async function refresh() {
   if (status.settings) {
     const s = status.settings;
     ml.textContent = s.model ? `${s.provider} · ${s.model}` : `${s.provider} · default model`;
-    ml.title = s.update_check_model
-      ? `Updates check uses: ${s.update_check_model}`
-      : 'Updates check uses the default Claude model';
+    ml.title = `Updates check uses: ${effectiveUpdateModel(s.update_check_model)}`;
   } else {
     ml.textContent = '';
   }
@@ -299,7 +306,7 @@ async function checkAiUpdates() {
   btn.disabled = true; btn.textContent = 'Checking…';
   list.innerHTML = '<div class="empty">Asking AI to check the web for newer versions… this can take a minute.</div>';
   try {
-    const model = (lastStatus && lastStatus.settings && lastStatus.settings.update_check_model) || '';
+    const model = effectiveUpdateModel(lastStatus && lastStatus.settings && lastStatus.settings.update_check_model);
     const r = await invoke('check_ai_updates', { model });
     const cost = `Checked ${r.checked} app${r.checked === 1 ? '' : 's'} · ~${fmtGbp(r.cost_usd)}`;
     countEl.textContent = r.updates.length ? `(${r.updates.length})` : '';
@@ -370,7 +377,7 @@ document.getElementById('ai-updates-list').addEventListener('click', (e) => {
   // Re-check just this app (uses its stored note) — no full sweep
   if (e.target.closest('.recheck-btn')) {
     const current = row.dataset.current || '';
-    const model = (lastStatus && lastStatus.settings && lastStatus.settings.update_check_model) || '';
+    const model = effectiveUpdateModel(lastStatus && lastStatus.settings && lastStatus.settings.update_check_model);
     row.innerHTML = `<span class="upd-name">${esc(name)}</span><span class="upd-ver">re-checking…</span>`;
     invoke('check_app_update', { name, current, model }).then(r => {
       if (r.updates && r.updates.length) {

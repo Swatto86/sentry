@@ -467,15 +467,32 @@ APP: {name} ({current}){note_line}"
 
 /// Spawn `claude --print --output-format json` with the given prompt and model,
 /// parse the result, and return the found updates plus the call's USD cost.
+/// Map a requested model to a Claude model the CLI will accept. Claude aliases
+/// (`haiku`/`sonnet`/`opus`) and any `claude*` id pass through; everything else
+/// — blank, or a non-Claude id such as an OpenRouter model — becomes `haiku`.
+fn claude_model_or_haiku(model: &str) -> String {
+    let m = model.trim();
+    let lower = m.to_lowercase();
+    let is_claude =
+        matches!(lower.as_str(), "haiku" | "sonnet" | "opus") || lower.starts_with("claude");
+    if is_claude {
+        m.to_string()
+    } else {
+        "haiku".to_string()
+    }
+}
+
 async fn run_claude_check(prompt: String, model: &str) -> Result<(Vec<AiUpdate>, f64), String> {
     let binary = claude_binary();
     let mut std_cmd = std::process::Command::new(&binary);
     std_cmd.args(["--print", "--output-format", "json"]);
     // The app-update check needs live web search, so it must run on a Claude
-    // model. Default to Haiku — the cheapest Claude model — when the field is
-    // left blank, rather than inheriting the CLI's (often pricier) default.
-    let model = if model.trim().is_empty() { "haiku" } else { model.trim() };
-    std_cmd.args(["--model", model]);
+    // model. Blank — or anything that isn't a Claude model (e.g. an OpenRouter
+    // id left over from the decision-loop model) — falls back to Haiku, the
+    // cheapest Claude model, so the check can never be handed a model the CLI
+    // would reject.
+    let model = claude_model_or_haiku(model);
+    std_cmd.args(["--model", model.as_str()]);
     std_cmd.creation_flags(CREATE_NO_WINDOW);
     let mut cmd = tokio::process::Command::from(std_cmd);
     cmd.kill_on_drop(true)
@@ -496,15 +513,22 @@ async fn run_claude_check(prompt: String, model: &str) -> Result<(Vec<AiUpdate>,
         .map_err(|e| e.to_string())?;
 
     if !output.status.success() {
+        // `claude --output-format json` writes its error to stdout, not stderr,
+        // so check both. Prefer whichever has content.
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr.trim();
-        let detail = if detail.is_empty() {
-            "the app-update model must be a Claude model (e.g. sonnet / haiku / opus); free/OpenRouter models can't be used here".to_string()
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let raw = if !stderr.trim().is_empty() {
+            stderr.trim()
         } else {
-            detail.chars().take(300).collect()
+            stdout.trim()
+        };
+        let detail: String = if raw.is_empty() {
+            "no output from claude — check the logged-in claude session".to_string()
+        } else {
+            raw.chars().take(400).collect()
         };
         return Err(format!(
-            "claude exited (code {}): {detail}",
+            "claude exited (code {}) using model '{model}': {detail}",
             output.status.code().unwrap_or(-1)
         ));
     }
@@ -612,5 +636,18 @@ iCloud Outlook             ARP\\Machine\\X64\\{81FA1580}       15.7.0.56";
         assert!(names.contains(&"iCloud Outlook"));
         assert!(!names.contains(&"7-Zip 25.01 (x64)"));
         assert!(!names.iter().any(|n| n.contains("NVIDIA")));
+    }
+
+    #[test]
+    fn non_claude_model_falls_back_to_haiku() {
+        // Blank and non-Claude ids become haiku; Claude aliases/ids pass through.
+        assert_eq!(claude_model_or_haiku(""), "haiku");
+        assert_eq!(claude_model_or_haiku("  "), "haiku");
+        assert_eq!(claude_model_or_haiku("nex-agi/nex-n2-pro:free"), "haiku");
+        assert_eq!(claude_model_or_haiku("nvidia/nemotron-3-super-120b-a12b:free"), "haiku");
+        assert_eq!(claude_model_or_haiku("haiku"), "haiku");
+        assert_eq!(claude_model_or_haiku("Sonnet"), "Sonnet");
+        assert_eq!(claude_model_or_haiku("opus"), "opus");
+        assert_eq!(claude_model_or_haiku("claude-haiku-4-5"), "claude-haiku-4-5");
     }
 }
