@@ -9,7 +9,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    Manager, State,
+    Manager, State, WindowEvent,
 };
 use tokio::sync::mpsc;
 use tracing::error;
@@ -42,40 +42,68 @@ async fn toggle_pause(tx: State<'_, UiCmdTx>) -> Result<(), String> {
 
 // ── Tray helpers ──────────────────────────────────────────────────────────────
 
-fn status_rgba(status: &str) -> Vec<u8> {
-    let fill: [u8; 4] = match status {
-        "Active" => [34, 197, 94, 255],
-        "Warning" => [234, 179, 8, 255],
-        "PendingApproval" => [249, 115, 22, 255],
-        "Executing" => [59, 130, 246, 255],
-        "Error" => [239, 68, 68, 255],
-        "ServiceDisconnected" => [239, 68, 68, 255],
-        _ => [107, 114, 128, 255],
-    };
-    let n = 16usize;
-    let mut px = vec![0u8; n * n * 4];
-    for y in 0..n {
-        for x in 0..n {
-            let i = (y * n + x) * 4;
-            if x == 0 || x == n - 1 || y == 0 || y == n - 1 {
-                px[i] = fill[0] / 2;
-                px[i + 1] = fill[1] / 2;
-                px[i + 2] = fill[2] / 2;
-                px[i + 3] = 255;
-            } else {
-                px[i..i + 4].copy_from_slice(&fill);
-            }
+/// The app icon (dark shield + green "S"), decoded to RGBA once at startup.
+struct IconBase {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+const ICON_PNG: &[u8] = include_bytes!("../../icons/128x128.png");
+
+fn decode_icon() -> IconBase {
+    let img = image::load_from_memory(ICON_PNG)
+        .expect("embedded icon must decode")
+        .to_rgba8();
+    let (width, height) = img.dimensions();
+    IconBase {
+        rgba: img.into_raw(),
+        width,
+        height,
+    }
+}
+
+/// The accent colour to paint the shield/"S" for a given status.
+/// `None` means leave the icon untouched (the original green app icon).
+fn status_accent(status: &str) -> Option<[u8; 3]> {
+    match status {
+        "Active" => None, // original green icon — exactly like the app icon
+        "Warning" => Some([234, 179, 8]),       // amber
+        "PendingApproval" => Some([249, 115, 22]), // orange
+        "Executing" => Some([59, 130, 246]),    // blue
+        "Error" | "ServiceDisconnected" => Some([239, 68, 68]), // red
+        _ => Some([107, 114, 128]),             // grey (connecting / unknown)
+    }
+}
+
+/// Repaint the bright foreground (the green border + "S") with `target`,
+/// leaving the dark shield background and transparent pixels intact.
+fn recolor(base: &IconBase, target: [u8; 3]) -> Vec<u8> {
+    let mut out = base.rgba.clone();
+    for px in out.chunks_exact_mut(4) {
+        if px[3] < 16 {
+            continue; // transparent
+        }
+        // Foreground accent pixels are the bright ones; the shield bg is dark.
+        if px[0].max(px[1]).max(px[2]) > 80 {
+            px[0] = target[0];
+            px[1] = target[1];
+            px[2] = target[2];
         }
     }
-    px
+    out
 }
 
-fn make_icon(status: &str) -> Image<'static> {
-    Image::new_owned(status_rgba(status), 16, 16)
+fn make_icon(base: &IconBase, status: &str) -> Image<'static> {
+    let pixels = match status_accent(status) {
+        None => base.rgba.clone(),
+        Some(target) => recolor(base, target),
+    };
+    Image::new_owned(pixels, base.width, base.height)
 }
 
-fn update_tray(tray: &TrayIcon<tauri::Wry>, status: &str) {
-    let _ = tray.set_icon(Some(make_icon(status)));
+fn update_tray(tray: &TrayIcon<tauri::Wry>, base: &IconBase, status: &str) {
+    let _ = tray.set_icon(Some(make_icon(base, status)));
     let _ = tray.set_tooltip(Some(&format!("Sentry — {status}")));
 }
 
@@ -97,6 +125,8 @@ fn main() {
         .manage(status)
         .manage(UiCmdTx(ui_cmd_tx))
         .setup(move |app| {
+            let icon_base = Arc::new(decode_icon());
+
             let open_item = MenuItem::with_id(app, "open", "Open Status", true, None::<&str>)?;
             let pause_item =
                 MenuItem::with_id(app, "pause", "Pause Monitoring", true, None::<&str>)?;
@@ -105,7 +135,7 @@ fn main() {
             let menu = Menu::with_items(app, &[&open_item, &pause_item, &sep, &quit_item])?;
 
             let tray = TrayIconBuilder::new()
-                .icon(make_icon("Connecting"))
+                .icon(make_icon(&icon_base, "Connecting"))
                 .tooltip("Sentry — Connecting")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
@@ -150,6 +180,7 @@ fn main() {
             });
 
             let status_tray = status_for_loop.clone();
+            let icon_for_loop = icon_base.clone();
             tauri::async_runtime::spawn(async move {
                 let mut last = String::new();
                 loop {
@@ -157,12 +188,20 @@ fn main() {
                     let current = status_tray.lock().unwrap().status.clone();
                     if current != last {
                         last = current.clone();
-                        update_tray(&tray, &current);
+                        update_tray(&tray, &icon_for_loop, &current);
                     }
                 }
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing the window hides it to the tray; the service keeps running.
+            // Use "Quit Sentry" from the tray menu to exit completely.
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_status,
