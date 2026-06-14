@@ -15,6 +15,8 @@ pub enum ApiProvider {
     #[default]
     Anthropic,
     OpenAiCompatible,
+    /// OpenRouter (openrouter.ai) — OpenAI-compatible; supports free models.
+    OpenRouter,
     /// Spawn the local `claude` CLI binary (no API key required).
     ClaudeCli,
 }
@@ -29,6 +31,8 @@ pub struct ApiConfig {
     pub base_url: Option<String>,
     /// OpenAI-compatible proxy: Bearer token ("not-needed" for claude-max-api-proxy)
     pub api_key: Option<String>,
+    /// OpenRouter API key (provider = "openrouter").
+    pub openrouter_api_key: Option<String>,
     /// Model name. Leave empty for claude_cli to use the CLI's configured default.
     #[serde(default)]
     pub model: String,

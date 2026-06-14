@@ -96,6 +96,10 @@ enum AiClientConfig {
         api_key: String,
         model: String,
     },
+    OpenRouter {
+        api_key: String,
+        model: String,
+    },
     ClaudeCli {
         binary: String,
         model: String,
@@ -127,6 +131,15 @@ impl AiClient {
                         model: cfg.model.clone(),
                     }
                 }
+                ApiProvider::OpenRouter => {
+                    let api_key = cfg.openrouter_api_key.clone().context(
+                        "[api] openrouter_api_key is required for provider = \"openrouter\"",
+                    )?;
+                    AiClientConfig::OpenRouter {
+                        api_key,
+                        model: cfg.model.clone(),
+                    }
+                }
                 ApiProvider::ClaudeCli => {
                     let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
                     let binary =
@@ -144,8 +157,9 @@ impl AiClient {
                 }
             };
         Ok(Self {
+            // Generous timeout: free OpenRouter models can take 60s+ to respond.
             http: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(300))
                 .build()?,
             config: inner,
         })
@@ -167,8 +181,19 @@ impl AiClient {
                 api_key,
                 model,
             } => (
-                self.call_openai_compatible(base_url, api_key, model, &prompt)
+                self.call_openai_style(base_url, api_key, model, &prompt, false)
                     .await?,
+                None,
+            ),
+            AiClientConfig::OpenRouter { api_key, model } => (
+                self.call_openai_style(
+                    "https://openrouter.ai/api/v1",
+                    api_key,
+                    model,
+                    &prompt,
+                    true,
+                )
+                .await?,
                 None,
             ),
             AiClientConfig::ClaudeCli {
@@ -184,11 +209,20 @@ impl AiClient {
         let json_text = strip_fences(&raw);
         debug!(
             text = &json_text[..json_text.len().min(500)],
-            "Raw Claude response"
+            "Raw model response"
         );
 
-        let decision: ClaudeDecision = serde_json::from_str(json_text)
-            .with_context(|| format!("Failed to parse Claude response as JSON:\n{json_text}"))?;
+        // Free models occasionally wrap the JSON in prose; fall back to the
+        // first {...last} object if a direct parse fails.
+        let decision: ClaudeDecision = match serde_json::from_str(json_text) {
+            Ok(d) => d,
+            Err(_) => {
+                let extracted = extract_json_object(json_text);
+                serde_json::from_str(extracted).with_context(|| {
+                    format!("Failed to parse model response as JSON:\n{json_text}")
+                })?
+            }
+        };
 
         info!(
             problems = decision.problems.len(),
@@ -262,14 +296,15 @@ impl AiClient {
         Ok(out)
     }
 
-    // ── OpenAI-compatible (/v1/chat/completions, claude-max-api-proxy) ────────
+    // ── OpenAI-compatible (/v1/chat/completions) — proxy & OpenRouter ─────────
 
-    async fn call_openai_compatible(
+    async fn call_openai_style(
         &self,
         base_url: &str,
         api_key: &str,
         model: &str,
         prompt: &str,
+        openrouter: bool,
     ) -> Result<String> {
         let url = format!("{base_url}/chat/completions");
         let body = OpenAiRequest {
@@ -282,19 +317,23 @@ impl AiClient {
             }],
         };
 
-        let resp = self
+        let mut req = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if openrouter {
+            // OpenRouter app attribution (optional but recommended).
+            req = req
+                .header("HTTP-Referer", "https://github.com/Swatto86/sentry")
+                .header("X-Title", "Sentry");
+        }
+
+        let resp = req
             .json(&body)
             .send()
             .await
-            .with_context(|| {
-                format!(
-                    "OpenAI-compatible request to {url} failed — is claude-max-api-proxy running?"
-                )
-            })?;
+            .with_context(|| format!("Request to {url} failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -466,6 +505,15 @@ fn resolve_claude_binary(configured: Option<&str>, user_profile: Option<&str>) -
         }
     }
     "claude".into()
+}
+
+/// Extract the outermost JSON object (first `{` to last `}`) — a fallback for
+/// models that surround the JSON with prose.
+fn extract_json_object(s: &str) -> &str {
+    match (s.find('{'), s.rfind('}')) {
+        (Some(a), Some(b)) if b > a => &s[a..=b],
+        _ => s,
+    }
 }
 
 fn strip_fences(s: &str) -> &str {

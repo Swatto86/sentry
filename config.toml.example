@@ -15,7 +15,21 @@ model = ""   # leave empty to use the CLI's configured default, or set e.g. "cla
 # anthropic_api_key = "sk-ant-..."
 # model = "claude-opus-4-8"
 
-# ── Option C: claude-max-api-proxy (OpenAI-compatible local proxy) ────────────
+# ── Option C: OpenRouter (openrouter.ai) — use FREE models, no Claude usage ───
+# Lowest-cost option: free models cost nothing and don't touch your Claude plan.
+# Free models are slower (30-90s) and a bit less reliable, but fine for a
+# background monitor. Pick a current free model from https://openrouter.ai/models
+# (filter: free). Good picks: a large free model with solid JSON output.
+# provider = "openrouter"
+# openrouter_api_key = "sk-or-v1-..."
+# model = "nvidia/nemotron-3-ultra-550b-a55b:free"   # or e.g. deepseek/deepseek-chat-v3-0324:free
+
+# ── Option D: Anthropic native API ────────────────────────────────────────────
+# provider = "anthropic"
+# anthropic_api_key = "sk-ant-..."
+# model = "claude-opus-4-8"
+
+# ── Option E: claude-max-api-proxy (OpenAI-compatible local proxy) ────────────
 # Run first: npx claude-max-api-proxy
 # provider = "openai_compatible"
 # base_url = "http://localhost:3456/v1"
