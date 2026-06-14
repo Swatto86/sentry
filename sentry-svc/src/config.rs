@@ -60,7 +60,7 @@ pub struct ApiConfig {
     /// Model name. Leave empty for claude_cli to use the CLI's configured default.
     #[serde(default)]
     pub model: String,
-    /// Claude model for the on-demand app-update check (empty = CLI default).
+    /// Claude model for the on-demand app-update check (empty = Haiku).
     #[serde(default)]
     pub update_check_model: String,
     /// claude_cli: path to the claude binary. Defaults to "claude" (must be in PATH).
