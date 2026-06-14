@@ -28,6 +28,9 @@ pub struct WhitelistConfig {
 pub struct BlocklistConfig {
     pub services: Vec<String>,
     pub paths: Vec<String>,
+    /// Action types that are never executed — not even with approval.
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
 
 pub enum Verdict {
@@ -44,7 +47,14 @@ impl ExecutionPolicy {
     }
 
     pub fn evaluate(&self, action: &FixAction, confidence: f32) -> Verdict {
-        // Hard blocklist first
+        let name = action_type_name(action);
+
+        // Action-type blocklist — never executed, not even with approval.
+        if self.blocklist.actions.iter().any(|a| a == name) {
+            return Verdict::Block(format!("Action '{name}' is disabled by policy"));
+        }
+
+        // Hard target blocklist (specific services / paths)
         if let Some(reason) = self.blocked_reason(action) {
             return Verdict::Block(reason);
         }
@@ -58,7 +68,6 @@ impl ExecutionPolicy {
         }
 
         // Whitelist check
-        let name = action_type_name(action);
         if !self.whitelist.actions.iter().any(|a| a == name) {
             return Verdict::RequireApproval(format!(
                 "Action '{name}' not on auto-execute whitelist"
@@ -113,6 +122,37 @@ impl ExecutionPolicy {
             .paths
             .iter()
             .any(|b| lower.starts_with(&b.to_lowercase()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A blocklisted action must be blocked even at max confidence and even if
+    /// it also appears on the whitelist — there is no path to execute it.
+    #[test]
+    fn blocklisted_action_is_always_blocked() {
+        let pol = ExecutionPolicy {
+            execution: ExecutionConfig {
+                confidence_threshold: 0.85,
+                max_retries_per_issue: 3,
+                rate_limit_mins: 30,
+                auto_approve_on_success_rate: 0.95,
+            },
+            whitelist: WhitelistConfig {
+                actions: vec!["software_uninstall".into()],
+            },
+            blocklist: BlocklistConfig {
+                services: vec![],
+                paths: vec![],
+                actions: vec!["software_uninstall".into()],
+            },
+        };
+        let action = FixAction::SoftwareUninstall {
+            package_name: "NordVPN".into(),
+        };
+        assert!(matches!(pol.evaluate(&action, 0.99), Verdict::Block(_)));
     }
 }
 

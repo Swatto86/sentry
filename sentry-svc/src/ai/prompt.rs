@@ -42,7 +42,6 @@ AVAILABLE FIX ACTIONS (use the exact action key and fields shown):
   registry_reset:        {{"action": "registry_reset", "key_path": "HKLM:\\...", "value_name": "...", "value_data": "..."}}
   network_diagnostic:    {{"action": "network_diagnostic", "command": "flush_dns"}}  -- flush_dns|release_renew|reset_tcp|reset_winsock
   driver_disable / driver_enable: {{"action": "...", "driver_name": "..."}}
-  software_uninstall:    {{"action": "software_uninstall", "package_name": "..."}}
   bcd_edit:              {{"action": "bcd_edit", "element": "timeout", "value": "30"}}  -- safe elements: timeout|bootmenupolicy|bootstatuspolicy|recoveryenabled|quietboot|nx
   process_kill:          {{"action": "process_kill", "process_name": "Notepad"}}
   file_delete:           {{"action": "file_delete", "path": "C:\\Users\\...\\AppData\\Local\\App\\cache\\file.db"}}
@@ -52,6 +51,14 @@ AVAILABLE FIX ACTIONS (use the exact action key and fields shown):
 Analyze thoroughly. For each LOG EVENT above, draw on your knowledge of that program's
 known issues and common fixes — including specific registry keys, cache paths, config
 locations, and documented workarounds. Propose the exact fix path for that program.
+
+Always prefer the least-destructive fix that addresses the ROOT CAUSE: repair or reset
+over removal. Fix the actual fault — clear a corrupted cache, reset a config/registry
+value, cycle a broken driver (driver_disable then driver_enable), or run a network_diagnostic
+— rather than removing the component. NEVER uninstall software; there is no reinstall path,
+so uninstalling is not an available remedy. If the only real fix would be destructive or is
+outside these actions, surface the diagnosis with a low-risk diagnostic instead of a
+destructive action.
 
 Report at most the 5 most important problems, ordered by severity. Omit trivia and
 anything you would rate below 0.6 confidence. If the system is healthy, return an empty
