@@ -1,6 +1,6 @@
 [package]
 name = "sentry-svc"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 authors = ["Swatto <claude.ai@swatto.co.uk>"]
 description = "Sentry system monitor service — runs as LocalSystem"
@@ -24,6 +24,7 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_System_Wmi",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Ole",
     "Win32_System_Variant",
     "Win32_Storage_FileSystem",
