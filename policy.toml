@@ -23,6 +23,11 @@ actions = [
 ]
 
 [blocklist]
+# Action types that are never executed — not even with approval.
+actions = [
+    "software_uninstall",   # one-way door: Sentry has no reinstall path, so never remove apps
+]
+
 services = [
     "NTDS",
     "KDC",
