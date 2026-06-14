@@ -24,13 +24,20 @@ use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 /// the pipe. A pipe created by the LocalSystem service otherwise only grants
 /// SYSTEM and Administrators, so the UI fails to open it with "Access is denied".
 ///
-/// Grants SYSTEM and Administrators full control, and Authenticated Users
-/// read + write (the UI must both receive status and send commands/approvals).
+/// Two parts matter:
+///  - DACL: SYSTEM + Administrators full control, Authenticated Users read+write
+///    (the UI must both receive status and send commands/approvals).
+///  - SACL mandatory label set to Medium (`S:(ML;;NW;;;ME)`). Without this the
+///    pipe inherits the LocalSystem creator's System integrity, and Windows'
+///    no-write-up rule lets the Medium-integrity UI *read* status but silently
+///    blocks its *writes* (Approve/Reject/Pause). Labelling the pipe Medium
+///    lets the UI write while still blocking Low-integrity (sandboxed) processes.
+///
 /// Returns the descriptor pointer as a `usize` so it can be carried across the
 /// listener's `.await` points (a raw pointer is not `Send`). The descriptor is
 /// intentionally leaked so the pointer stays valid for the life of the service.
 fn build_pipe_security_descriptor() -> Option<usize> {
-    let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+    let sddl: Vec<u16> = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)S:(ML;;NW;;;ME)"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -56,6 +63,10 @@ pub struct PipeServer {
 }
 
 pub fn spawn() -> (PipeServer, mpsc::Receiver<UiMsg>) {
+    spawn_named(PIPE_NAME)
+}
+
+fn spawn_named(pipe_name: &'static str) -> (PipeServer, mpsc::Receiver<UiMsg>) {
     let (status_tx, _) = watch::channel(StatusPayload::default());
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::channel::<UiMsg>(8);
     let approvals: Approvals = Arc::new(Mutex::new(HashMap::new()));
@@ -67,12 +78,13 @@ pub fn spawn() -> (PipeServer, mpsc::Receiver<UiMsg>) {
         next_id: next_id.clone(),
     };
 
-    tokio::spawn(listener_task(status_tx, ui_cmd_tx, approvals));
+    tokio::spawn(listener_task(pipe_name, status_tx, ui_cmd_tx, approvals));
 
     (srv, ui_cmd_rx)
 }
 
 async fn listener_task(
+    pipe_name: &'static str,
     status_tx: watch::Sender<StatusPayload>,
     ui_cmd_tx: mpsc::Sender<UiMsg>,
     approvals: Approvals,
@@ -98,12 +110,12 @@ async fn listener_task(
                     };
                     unsafe {
                         opts.create_with_security_attributes_raw(
-                            PIPE_NAME,
+                            pipe_name,
                             (&mut sa as *mut SECURITY_ATTRIBUTES).cast::<c_void>(),
                         )
                     }
                 }
-                None => opts.create(PIPE_NAME),
+                None => opts.create(pipe_name),
             }
         };
         let server = match created {
@@ -118,7 +130,7 @@ async fn listener_task(
             }
         };
 
-        info!("Named pipe listening on {PIPE_NAME}");
+        info!("Named pipe listening on {pipe_name}");
 
         if let Err(e) = server.connect().await {
             warn!("Pipe connect error: {e}");
@@ -215,5 +227,44 @@ impl PipeServer {
 
     pub fn next_approval_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    /// End-to-end: a client connected to the server pipe can approve a pending
+    /// request and unblock `request_approval`. Reproduces the UI → service path.
+    #[tokio::test]
+    async fn approve_message_resolves_request() {
+        let name = r"\\.\pipe\SentrySvcTestApprove";
+        let (srv, _ui_rx) = spawn_named(name);
+        // Let the listener create the pipe instance.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let client = ClientOptions::new().open(name).expect("client connect");
+        // Let the listener's connect() return and its read loop start.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Service awaits approval for id = 7.
+        let handle = tokio::spawn(async move {
+            srv.request_approval(7, StatusPayload::default()).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Client sends exactly what the UI serialises for UiMsg::Approve.
+        let (_r, mut w) = tokio::io::split(client);
+        w.write_all(b"{\"type\":\"approve\",\"id\":7,\"approved\":true}\n")
+            .await
+            .expect("client write");
+        w.flush().await.expect("flush");
+
+        let approved = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("request_approval should resolve, not time out")
+            .expect("task join");
+        assert!(approved, "approval should be true");
     }
 }
