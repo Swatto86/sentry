@@ -57,6 +57,9 @@ pub struct ApiConfig {
     /// Model name. Leave empty for claude_cli to use the CLI's configured default.
     #[serde(default)]
     pub model: String,
+    /// Claude model for the on-demand app-update check (empty = CLI default).
+    #[serde(default)]
+    pub update_check_model: String,
     /// claude_cli: path to the claude binary. Defaults to "claude" (must be in PATH).
     pub claude_cli_path: Option<String>,
     /// claude_cli: your Windows user profile root (e.g. C:\Users\Swatto).
@@ -85,6 +88,7 @@ impl Config {
         UiSettings {
             provider: self.api.provider.as_str().to_string(),
             model: self.api.model.clone(),
+            update_check_model: self.api.update_check_model.clone(),
             base_url: self.api.base_url.clone().unwrap_or_default(),
             decision_interval_secs: self.monitoring.decision_interval_secs,
             event_log_poll_interval_secs: self.monitoring.event_log_poll_interval_secs,
@@ -101,6 +105,7 @@ impl Config {
     pub fn apply_update(&mut self, u: SettingsUpdate) {
         self.api.provider = ApiProvider::parse(&u.provider);
         self.api.model = u.model;
+        self.api.update_check_model = u.update_check_model;
         let keep = |cur: &mut Option<String>, new: Option<String>| {
             if let Some(v) = new {
                 if !v.trim().is_empty() {
@@ -175,6 +180,7 @@ audit_db = "./sentry.db"
         cfg.apply_update(SettingsUpdate {
             provider: "openrouter".into(),
             model: "nvidia/nemotron-3-super-120b-a12b:free".into(),
+            update_check_model: "claude-haiku-4-5".into(),
             base_url: Some(String::new()),
             openrouter_api_key: Some("sk-or-test".into()),
             anthropic_api_key: None,
@@ -190,8 +196,12 @@ audit_db = "./sentry.db"
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.api.provider.as_str(), "openrouter");
         assert_eq!(reparsed.api.model, "nvidia/nemotron-3-super-120b-a12b:free");
-        assert_eq!(reparsed.api.openrouter_api_key.as_deref(), Some("sk-or-test"));
+        assert_eq!(
+            reparsed.api.openrouter_api_key.as_deref(),
+            Some("sk-or-test")
+        );
         assert_eq!(reparsed.monitoring.decision_interval_secs, 900);
+        assert_eq!(reparsed.api.update_check_model, "claude-haiku-4-5");
         assert_eq!(reparsed.monitoring.event_log_channels.len(), 2);
         // Blank api key keeps the prior value (None here).
         assert!(reparsed.api.anthropic_api_key.is_none());

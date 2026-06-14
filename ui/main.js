@@ -83,6 +83,9 @@ function fmtTokens(n) {
   return String(n);
 }
 
+let gbpRate = 0.79; // USD→GBP; refreshed from gbp_per_usd on load
+function fmtGbp(usd) { return '£' + ((usd || 0) * gbpRate).toFixed(2); }
+
 function renderUsage(u) {
   const card = document.getElementById('usage-card');
   if (!u) { card.style.display = 'none'; return; }
@@ -91,7 +94,7 @@ function renderUsage(u) {
   // Free models (OpenRouter free) and the Claude subscription incur no charge,
   // so don't show a misleading dollar figure for them.
   const free = provider === 'openrouter' || provider === 'claude_cli';
-  const costCell = c => free ? '—' : ('$' + (c || 0).toFixed(2));
+  const costCell = c => free ? '—' : fmtGbp(c);
   const note = provider === 'openrouter'
     ? 'Free model — no cost. Token counts shown for transparency.'
     : provider === 'claude_cli'
@@ -126,6 +129,18 @@ async function refresh() {
   txt.textContent = status.error
     ? `Error: ${status.error}`
     : status.status.replace(/([A-Z])/g, ' $1').trim();
+
+  // Live model label
+  const ml = document.getElementById('model-label');
+  if (status.settings) {
+    const s = status.settings;
+    ml.textContent = s.model ? `${s.provider} · ${s.model}` : `${s.provider} · default model`;
+    ml.title = s.update_check_model
+      ? `Updates check uses: ${s.update_check_model}`
+      : 'Updates check uses the default Claude model';
+  } else {
+    ml.textContent = '';
+  }
 
   // Pause button label
   document.getElementById('pause-btn').textContent =
@@ -284,8 +299,9 @@ async function checkAiUpdates() {
   btn.disabled = true; btn.textContent = 'Checking…';
   list.innerHTML = '<div class="empty">Asking AI to check the web for newer versions… this can take a minute.</div>';
   try {
-    const r = await invoke('check_ai_updates');
-    const cost = `Checked ${r.checked} app${r.checked === 1 ? '' : 's'} · ~$${r.cost_usd.toFixed(2)}`;
+    const model = (lastStatus && lastStatus.settings && lastStatus.settings.update_check_model) || '';
+    const r = await invoke('check_ai_updates', { model });
+    const cost = `Checked ${r.checked} app${r.checked === 1 ? '' : 's'} · ~${fmtGbp(r.cost_usd)}`;
     countEl.textContent = r.updates.length ? `(${r.updates.length})` : '';
     let html = '';
     if (r.note) html += `<div class="upd-note">${esc(r.note)}</div>`;
@@ -293,10 +309,11 @@ async function checkAiUpdates() {
       html += '<div class="empty">No updates found for non-winget apps.</div>';
     } else {
       html += r.updates.map(u => `
-        <div class="upd-row" data-name="${esc(u.name)}">
+        <div class="upd-row" data-name="${esc(u.name)}" data-current="${esc(u.current || '')}">
           <span class="upd-name" title="${esc(u.name)}">${esc(u.name)}</span>
           <span class="upd-ver">${esc(u.current || '?')} → ${esc(u.latest)}</span>
           ${u.url ? `<button class="upd-dl" data-url="${esc(u.url)}">Download</button>` : ''}
+          <button class="upd-mini recheck-btn">Re-check</button>
           <button class="upd-mini note-btn">Note</button>
           <button class="upd-mini ignore-btn">Ignore</button>
         </div>`).join('');
@@ -340,13 +357,40 @@ document.getElementById('ai-updates-list').addEventListener('click', (e) => {
     inp.addEventListener('keydown', ev => { if (ev.key === 'Enter') row.querySelector('.note-save').click(); });
     return;
   }
-  // Save the typed note
+  // Save the typed note, then offer a one-app re-check using it
   if (e.target.closest('.note-save')) {
     const val = row.querySelector('.note-input').value;
     invoke('set_app_note', { name, note: val, ignore: false })
       .then(() => { row.innerHTML =
-        `<span class="upd-name">${esc(name)}</span><span class="upd-ver">note saved — used on the next check</span>`; })
+        `<span class="upd-name">${esc(name)}</span><span class="upd-ver">note saved</span>` +
+        `<button class="upd-mini recheck-btn">Re-check now</button>`; })
       .catch(err => console.error(err));
+    return;
+  }
+  // Re-check just this app (uses its stored note) — no full sweep
+  if (e.target.closest('.recheck-btn')) {
+    const current = row.dataset.current || '';
+    const model = (lastStatus && lastStatus.settings && lastStatus.settings.update_check_model) || '';
+    row.innerHTML = `<span class="upd-name">${esc(name)}</span><span class="upd-ver">re-checking…</span>`;
+    invoke('check_app_update', { name, current, model }).then(r => {
+      if (r.updates && r.updates.length) {
+        const u = r.updates[0];
+        row.innerHTML =
+          `<span class="upd-name" title="${esc(name)}">${esc(name)}</span>` +
+          `<span class="upd-ver">${esc(u.current || current || '?')} → ${esc(u.latest)} · ~${fmtGbp(r.cost_usd)}</span>` +
+          (u.url ? `<button class="upd-dl" data-url="${esc(u.url)}">Download</button>` : '') +
+          `<button class="upd-mini recheck-btn">Re-check</button>` +
+          `<button class="upd-mini note-btn">Note</button>` +
+          `<button class="upd-mini ignore-btn">Ignore</button>`;
+      } else {
+        row.innerHTML =
+          `<span class="upd-name">${esc(name)}</span>` +
+          `<span class="upd-ver">up to date${r.note ? ' — ' + esc(r.note) : ''} · ~${fmtGbp(r.cost_usd)}</span>` +
+          `<button class="upd-mini note-btn">Note</button>`;
+      }
+    }).catch(err => {
+      row.innerHTML = `<span class="upd-name">${esc(name)}</span><span class="upd-ver">re-check failed: ${esc(String(err))}</span><button class="upd-mini recheck-btn">Re-check</button>`;
+    });
     return;
   }
 });
@@ -358,6 +402,7 @@ function fillSettings() {
   if (!s) return;
   document.getElementById('set-provider').value = s.provider || 'openrouter';
   document.getElementById('set-model').value = s.model || '';
+  document.getElementById('set-upd-model').value = s.update_check_model || '';
   document.getElementById('set-base').value = s.base_url || '';
   document.getElementById('set-decint').value = s.decision_interval_secs || 600;
   document.getElementById('set-elpoll').value = s.event_log_poll_interval_secs || 30;
@@ -390,6 +435,7 @@ async function saveSettings() {
   const settings = {
     provider: document.getElementById('set-provider').value,
     model: document.getElementById('set-model').value.trim(),
+    update_check_model: document.getElementById('set-upd-model').value.trim(),
     base_url: document.getElementById('set-base').value.trim(),
     openrouter_api_key: orKey || null,
     anthropic_api_key: anKey || null,
@@ -452,3 +498,6 @@ setInterval(refresh, 2000);
 // Check for app updates on launch, then hourly
 loadUpdates();
 setInterval(loadUpdates, 60 * 60 * 1000);
+
+// Fetch the USD→GBP rate so costs display in pounds
+invoke('gbp_per_usd').then(r => { if (r > 0) gbpRate = r; }).catch(() => {});

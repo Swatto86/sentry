@@ -262,6 +262,8 @@ fn main() {
             updates::update_app,
             updates::update_all_apps,
             updates::check_ai_updates,
+            updates::check_app_update,
+            updates::gbp_per_usd,
             updates::open_url,
             updates::set_app_note
         ])

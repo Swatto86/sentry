@@ -140,53 +140,54 @@ enum AiClientConfig {
 
 impl AiClient {
     pub fn new(cfg: &ApiConfig) -> Result<Self> {
-        let inner =
-            match cfg.provider {
-                ApiProvider::Anthropic => {
-                    let key = cfg.anthropic_api_key.clone().context(
-                        "[api] anthropic_api_key is required for provider = \"anthropic\"",
-                    )?;
-                    AiClientConfig::Anthropic {
-                        api_key: key,
-                        model: cfg.model.clone(),
-                    }
+        let inner = match cfg.provider {
+            ApiProvider::Anthropic => {
+                let key = cfg
+                    .anthropic_api_key
+                    .clone()
+                    .context("[api] anthropic_api_key is required for provider = \"anthropic\"")?;
+                AiClientConfig::Anthropic {
+                    api_key: key,
+                    model: cfg.model.clone(),
                 }
-                ApiProvider::OpenAiCompatible => {
-                    let base_url = cfg.base_url.clone().context(
-                        "[api] base_url is required for provider = \"openai_compatible\"",
-                    )?;
-                    let api_key = cfg.api_key.clone().unwrap_or_else(|| "not-needed".into());
-                    AiClientConfig::OpenAiCompatible {
-                        base_url: base_url.trim_end_matches('/').to_string(),
-                        api_key,
-                        model: cfg.model.clone(),
-                    }
+            }
+            ApiProvider::OpenAiCompatible => {
+                let base_url = cfg
+                    .base_url
+                    .clone()
+                    .context("[api] base_url is required for provider = \"openai_compatible\"")?;
+                let api_key = cfg.api_key.clone().unwrap_or_else(|| "not-needed".into());
+                AiClientConfig::OpenAiCompatible {
+                    base_url: base_url.trim_end_matches('/').to_string(),
+                    api_key,
+                    model: cfg.model.clone(),
                 }
-                ApiProvider::OpenRouter => {
-                    let api_key = cfg.openrouter_api_key.clone().context(
-                        "[api] openrouter_api_key is required for provider = \"openrouter\"",
-                    )?;
-                    AiClientConfig::OpenRouter {
-                        api_key,
-                        model: cfg.model.clone(),
-                    }
+            }
+            ApiProvider::OpenRouter => {
+                let api_key = cfg.openrouter_api_key.clone().context(
+                    "[api] openrouter_api_key is required for provider = \"openrouter\"",
+                )?;
+                AiClientConfig::OpenRouter {
+                    api_key,
+                    model: cfg.model.clone(),
                 }
-                ApiProvider::ClaudeCli => {
-                    let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
-                    let binary =
-                        resolve_claude_binary(cfg.claude_cli_path.as_deref(), user_profile.as_deref());
-                    info!(
-                        binary = %binary,
-                        user_profile = user_profile.as_deref().unwrap_or("<not found>"),
-                        "claude_cli provider configured"
-                    );
-                    AiClientConfig::ClaudeCli {
-                        binary,
-                        model: cfg.model.clone(),
-                        user_profile,
-                    }
+            }
+            ApiProvider::ClaudeCli => {
+                let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
+                let binary =
+                    resolve_claude_binary(cfg.claude_cli_path.as_deref(), user_profile.as_deref());
+                info!(
+                    binary = %binary,
+                    user_profile = user_profile.as_deref().unwrap_or("<not found>"),
+                    "claude_cli provider configured"
+                );
+                AiClientConfig::ClaudeCli {
+                    binary,
+                    model: cfg.model.clone(),
+                    user_profile,
                 }
-            };
+            }
+        };
         Ok(Self {
             // Generous timeout: free OpenRouter models can take 60s+ to respond.
             http: Client::builder()
@@ -216,8 +217,14 @@ impl AiClient {
                     .await?
             }
             AiClientConfig::OpenRouter { api_key, model } => {
-                self.call_openai_style("https://openrouter.ai/api/v1", api_key, model, &prompt, true)
-                    .await?
+                self.call_openai_style(
+                    "https://openrouter.ai/api/v1",
+                    api_key,
+                    model,
+                    &prompt,
+                    true,
+                )
+                .await?
             }
             AiClientConfig::ClaudeCli {
                 binary,
@@ -292,7 +299,9 @@ impl AiClient {
         let mut stream = resp.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            if done { break; }
+            if done {
+                break;
+            }
             let chunk = chunk.context("Anthropic stream read error")?;
             line_buf.push_str(std::str::from_utf8(&chunk).unwrap_or(""));
             while let Some(pos) = line_buf.find('\n') {
@@ -377,7 +386,9 @@ impl AiClient {
         let mut stream = resp.bytes_stream();
 
         while let Some(chunk) = stream.next().await {
-            if done { break; }
+            if done {
+                break;
+            }
             let chunk = chunk.context("OpenAI-compatible stream read error")?;
             line_buf.push_str(std::str::from_utf8(&chunk).unwrap_or(""));
             while let Some(pos) = line_buf.find('\n') {
@@ -566,7 +577,12 @@ fn extract_json_object(s: &str) -> &str {
 
 fn strip_fences(s: &str) -> &str {
     // Check ````json` before ```` to avoid matching the shorter fence first
-    for (open, close) in [("```json", "```"), ("```", "```"), ("~~~json", "~~~"), ("~~~", "~~~")] {
+    for (open, close) in [
+        ("```json", "```"),
+        ("```", "```"),
+        ("~~~json", "~~~"),
+        ("~~~", "~~~"),
+    ] {
         if let Some(start) = s.find(open) {
             let after = &s[start + open.len()..];
             return after
