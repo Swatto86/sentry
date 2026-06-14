@@ -87,6 +87,16 @@ function renderUsage(u) {
   const card = document.getElementById('usage-card');
   if (!u) { card.style.display = 'none'; return; }
   card.style.display = 'block';
+  const provider = (lastStatus && lastStatus.settings && lastStatus.settings.provider) || '';
+  // Free models (OpenRouter free) and the Claude subscription incur no charge,
+  // so don't show a misleading dollar figure for them.
+  const free = provider === 'openrouter' || provider === 'claude_cli';
+  const costCell = c => free ? '—' : ('$' + (c || 0).toFixed(2));
+  const note = provider === 'openrouter'
+    ? 'Free model — no cost. Token counts shown for transparency.'
+    : provider === 'claude_cli'
+      ? 'No charge — uses your Claude subscription. Token counts shown for transparency.'
+      : 'Estimated pay-as-you-go API cost.';
   document.getElementById('usage-body').innerHTML = `
     <div class="usage-grid">
       <div></div><div class="usage-h">Last 24h</div><div class="usage-h">Last 7 days</div>
@@ -94,10 +104,10 @@ function renderUsage(u) {
       <div class="usage-v">${u.calls_today}</div><div class="usage-v">${u.calls_week}</div>
       <div class="usage-l">Tokens</div>
       <div class="usage-v">${fmtTokens(u.tokens_today)}</div><div class="usage-v">${fmtTokens(u.tokens_week)}</div>
-      <div class="usage-l">Equiv. cost</div>
-      <div class="usage-v">$${u.cost_today_usd.toFixed(2)}</div><div class="usage-v">$${u.cost_week_usd.toFixed(2)}</div>
+      <div class="usage-l">Est. cost</div>
+      <div class="usage-v">${costCell(u.cost_today_usd)}</div><div class="usage-v">${costCell(u.cost_week_usd)}</div>
     </div>
-    <div class="usage-note">Equivalent pay-as-you-go API cost — covered by your subscription, not a separate charge.</div>
+    <div class="usage-note">${note}</div>
   `;
 }
 

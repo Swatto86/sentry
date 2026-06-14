@@ -45,6 +45,20 @@ struct OpenAiRequest<'a> {
     max_tokens: u32,
     stream: bool,
     messages: Vec<ChatMessage<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<UsageInclude>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Serialize)]
+struct UsageInclude {
+    include: bool,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +66,16 @@ struct OpenAiChunk {
     choices: Option<Vec<OpenAiChoice>>,
     /// OpenRouter/free models may stream an error object instead of content.
     error: Option<OpenAiStreamError>,
+    /// Present in the final chunk when usage accounting is requested.
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    /// OpenRouter adds the request cost (USD); 0 for free models.
+    cost: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -187,22 +211,14 @@ impl AiClient {
                 base_url,
                 api_key,
                 model,
-            } => (
+            } => {
                 self.call_openai_style(base_url, api_key, model, &prompt, false)
-                    .await?,
-                None,
-            ),
-            AiClientConfig::OpenRouter { api_key, model } => (
-                self.call_openai_style(
-                    "https://openrouter.ai/api/v1",
-                    api_key,
-                    model,
-                    &prompt,
-                    true,
-                )
-                .await?,
-                None,
-            ),
+                    .await?
+            }
+            AiClientConfig::OpenRouter { api_key, model } => {
+                self.call_openai_style("https://openrouter.ai/api/v1", api_key, model, &prompt, true)
+                    .await?
+            }
             AiClientConfig::ClaudeCli {
                 binary,
                 model,
@@ -312,7 +328,7 @@ impl AiClient {
         model: &str,
         prompt: &str,
         openrouter: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<CallUsage>)> {
         let url = format!("{base_url}/chat/completions");
         let body = OpenAiRequest {
             model,
@@ -322,6 +338,12 @@ impl AiClient {
                 role: "user",
                 content: prompt,
             }],
+            // Ask OpenRouter to stream a final usage chunk (tokens + cost). The
+            // proxy path leaves these off to avoid unsupported-field errors.
+            stream_options: openrouter.then_some(StreamOptions {
+                include_usage: true,
+            }),
+            usage: openrouter.then_some(UsageInclude { include: true }),
         };
 
         let mut req = self
@@ -349,6 +371,7 @@ impl AiClient {
         }
 
         let mut out = String::new();
+        let mut usage: Option<CallUsage> = None;
         let mut line_buf = String::new();
         let mut done = false;
         let mut stream = resp.bytes_stream();
@@ -376,6 +399,15 @@ impl AiClient {
                             let msg = err.message.unwrap_or_else(|| "unknown error".into());
                             bail!("model API error: {msg}");
                         }
+                        if let Some(u) = chunk.usage {
+                            usage = Some(CallUsage {
+                                input_tokens: u.prompt_tokens.unwrap_or(0),
+                                output_tokens: u.completion_tokens.unwrap_or(0),
+                                cache_creation: 0,
+                                cache_read: 0,
+                                cost_usd: u.cost.unwrap_or(0.0),
+                            });
+                        }
                         if let Some(choices) = chunk.choices {
                             if let Some(choice) = choices.into_iter().next() {
                                 if let Some(content) = choice.delta.content {
@@ -390,7 +422,7 @@ impl AiClient {
         if out.trim().is_empty() {
             bail!("model returned an empty response (it may be rate-limited or unavailable)");
         }
-        Ok(out)
+        Ok((out, usage))
     }
 
     // ── Claude CLI subprocess (no API key — uses the logged-in claude session) ──
