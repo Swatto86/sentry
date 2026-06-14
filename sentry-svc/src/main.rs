@@ -358,9 +358,16 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
         Ok(d) => d,
         Err(e) => fatal!(format!("DB init: {e}")),
     };
+    // A bad AI config must NOT kill the service — degrade instead, so the pipe
+    // and UI stay alive and the user can fix it in Settings.
     let ai = match ai::client::AiClient::new(&cfg.api) {
-        Ok(c) => c,
-        Err(e) => fatal!(format!("AI client: {e}")),
+        Ok(c) => Some(c),
+        Err(e) => {
+            error!("AI client init failed: {e}");
+            st.status = "Error".to_string();
+            st.error = Some(format!("AI provider not configured: {e} — fix it in Settings"));
+            None
+        }
     };
 
     let (event_log_shared, _el_shutdown) = signals::event_log::spawn(
@@ -421,20 +428,32 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         }
                         UiMsg::UpdateSettings(update) => {
                             cfg.apply_update(*update);
-                            st.settings = Some(cfg.to_ui_settings());
-                            match config::save(&cfg, "config.toml") {
-                                Ok(()) => {
-                                    info!("Settings saved — restarting service to apply");
-                                    st.status = "Restarting".to_string();
-                                    st.error = None;
-                                    pipe.broadcast_status(build_status(&st, None));
-                                    restart_self();
-                                    return; // SCM stop will follow; exit cleanly now
+                            // Validate before committing — never restart into a broken
+                            // provider (e.g. openrouter with no key would brick the service).
+                            if let Err(e) = ai::client::AiClient::new(&cfg.api) {
+                                warn!("Rejected settings: {e}");
+                                st.error = Some(format!("Settings not applied — {e}"));
+                                if let Ok(reloaded) = config::load("config.toml") {
+                                    cfg = reloaded; // discard the invalid change
                                 }
-                                Err(e) => {
-                                    error!("Failed to save settings: {e}");
-                                    st.error = Some(format!("Save settings: {e}"));
-                                    pipe.broadcast_status(build_status(&st, None));
+                                st.settings = Some(cfg.to_ui_settings());
+                                pipe.broadcast_status(build_status(&st, None));
+                            } else {
+                                st.settings = Some(cfg.to_ui_settings());
+                                match config::save(&cfg, "config.toml") {
+                                    Ok(()) => {
+                                        info!("Settings saved — restarting service to apply");
+                                        st.status = "Restarting".to_string();
+                                        st.error = None;
+                                        pipe.broadcast_status(build_status(&st, None));
+                                        restart_self();
+                                        return; // SCM stop will follow; exit cleanly now
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to save settings: {e}");
+                                        st.error = Some(format!("Save settings: {e}"));
+                                        pipe.broadcast_status(build_status(&st, None));
+                                    }
                                 }
                             }
                         }
@@ -497,6 +516,12 @@ async fn sentry_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                     st.failed_services = sys.failed_services.clone();
                 }
                 pipe.broadcast_status(build_status(&st, None));
+
+                // No AI provider configured — keep collecting signals and serving
+                // the UI (so Settings stays usable), but skip analysis.
+                let Some(ai) = ai.as_ref() else {
+                    continue;
+                };
 
                 // ── Feedback after-states ────────────────────────────────────
                 if let Err(e) =
