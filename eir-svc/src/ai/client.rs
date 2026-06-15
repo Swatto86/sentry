@@ -167,16 +167,24 @@ impl AiClient {
                 }
             }
             ApiProvider::OpenRouter => {
-                let api_key = cfg.openrouter_api_key.clone().context(
-                    "[api] openrouter_api_key is required for provider = \"openrouter\"",
-                )?;
-                if cfg.model.trim().is_empty() {
-                    bail!("[api] a model is required for provider = \"openrouter\" — pick one in Settings (e.g. nvidia/nemotron-3-super-120b-a12b:free)");
-                }
-                AiClientConfig::OpenRouter {
-                    api_key,
-                    model: cfg.model.clone(),
-                }
+                // Use the configured key, else auto-detect one from a logged-in
+                // OpenRouter CLI (~/.openrouter/config.json), mirroring the
+                // Claude session auto-detect — so no key needs pasting.
+                let api_key = cfg
+                    .openrouter_api_key
+                    .clone()
+                    .filter(|k| !k.trim().is_empty())
+                    .or_else(resolve_openrouter_key)
+                    .context(
+                        "[api] OpenRouter needs an API key — add it in Settings, or log in with the OpenRouter CLI (~/.openrouter/config.json)",
+                    )?;
+                // Blank model defaults to the free auto-routing meta-model.
+                let model = if cfg.model.trim().is_empty() {
+                    "openrouter/free".to_string()
+                } else {
+                    cfg.model.clone()
+                };
+                AiClientConfig::OpenRouter { api_key, model }
             }
             ApiProvider::ClaudeCli => {
                 let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
@@ -551,6 +559,27 @@ fn resolve_user_profile(configured: Option<&str>) -> Option<String> {
         let dir = entry.path();
         if dir.join(".claude").join(".credentials.json").is_file() {
             return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Scan `C:\Users` for a logged-in OpenRouter CLI config and return its API
+/// key, mirroring the Claude session auto-detect. Lets an OpenRouter user run
+/// with nothing pasted into Settings.
+fn resolve_openrouter_key() -> Option<String> {
+    let users = std::fs::read_dir("C:\\Users").ok()?;
+    for entry in users.flatten() {
+        let path = entry.path().join(".openrouter").join("config.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let key = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("apiKey").and_then(|k| k.as_str()).map(str::to_string))
+            .filter(|k| !k.trim().is_empty());
+        if let Some(k) = key {
+            return Some(k.trim().to_string());
         }
     }
     None
