@@ -36,6 +36,10 @@ pub struct UiSettings {
     pub wmi_poll_interval_secs: u64,
     pub event_log_channels: Vec<String>,
     pub log_directories: Vec<String>,
+    /// Minimum AI confidence (0.0–1.0) for a whitelisted fix to auto-execute;
+    /// anything below this is blocked.
+    #[serde(default)]
+    pub confidence_threshold: f32,
     pub openrouter_key_set: bool,
     pub anthropic_key_set: bool,
     pub api_key_set: bool,
@@ -57,6 +61,8 @@ pub struct SettingsUpdate {
     pub wmi_poll_interval_secs: u64,
     pub event_log_channels: Vec<String>,
     pub log_directories: Vec<String>,
+    #[serde(default)]
+    pub confidence_threshold: f32,
 }
 
 /// Aggregated AI usage, surfaced in the UI so the user can see how much of

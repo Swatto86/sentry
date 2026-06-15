@@ -313,15 +313,13 @@ async function checkAiUpdates() {
   if (aiBusy) return;
   aiBusy = true;
   const list = document.getElementById('ai-updates-list');
-  const countEl = document.getElementById('ai-updates-count');
   const btn = document.getElementById('ai-check-btn');
   btn.disabled = true; btn.textContent = 'Checking…';
   list.innerHTML = '<div class="empty">Asking AI to check the web for newer versions… this can take a minute.</div>';
   try {
     const r = await invoke('check_ai_updates');
     const cost = `Checked ${r.checked} app${r.checked === 1 ? '' : 's'} · ~${fmtGbp(r.cost_usd)}`;
-    countEl.textContent = r.updates.length ? `(${r.updates.length})` : '';
-    let html = '';
+    let html = '<div class="upd-note">Apps not covered by winget:</div>';
     if (r.note) html += `<div class="upd-note">${esc(r.note)}</div>`;
     if (!r.updates.length) {
       html += '<div class="empty">No updates found for non-winget apps.</div>';
@@ -340,7 +338,6 @@ async function checkAiUpdates() {
     list.innerHTML = html;
   } catch (e) {
     list.innerHTML = `<div class="empty">${esc(String(e))}</div>`;
-    countEl.textContent = '';
   }
   aiBusy = false;
   btn.disabled = false; btn.textContent = 'Check other apps';
@@ -421,6 +418,7 @@ function fillSettings() {
   document.getElementById('set-model').value = s.model || '';
   document.getElementById('set-upd-model').value = s.update_check_model || '';
   document.getElementById('set-base').value = s.base_url || '';
+  document.getElementById('set-conf').value = Math.round((s.confidence_threshold || 0.80) * 100);
   document.getElementById('set-decint').value = s.decision_interval_secs || 600;
   document.getElementById('set-elpoll').value = s.event_log_poll_interval_secs || 30;
   document.getElementById('set-wmipoll').value = s.wmi_poll_interval_secs || 300;
@@ -457,6 +455,7 @@ async function saveSettings() {
     openrouter_api_key: orKey || null,
     anthropic_api_key: anKey || null,
     api_key: null,
+    confidence_threshold: (parseInt(document.getElementById('set-conf').value, 10) || 80) / 100,
     decision_interval_secs: parseInt(document.getElementById('set-decint').value, 10) || 600,
     event_log_poll_interval_secs: parseInt(document.getElementById('set-elpoll').value, 10) || 30,
     wmi_poll_interval_secs: parseInt(document.getElementById('set-wmipoll').value, 10) || 300,

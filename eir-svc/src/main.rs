@@ -342,7 +342,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     };
     st.settings = Some(cfg.to_ui_settings());
 
-    let pol = match policy::ExecutionPolicy::load(
+    let mut pol = match policy::ExecutionPolicy::load(
         config::resolve("policy.toml")
             .to_str()
             .unwrap_or("policy.toml"),
@@ -350,6 +350,9 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
         Ok(p) => p,
         Err(e) => fatal!(format!("policy.toml: {e}")),
     };
+    // The live confidence threshold is the user-editable config value; policy.toml
+    // only provides the fallback default.
+    pol.execution.confidence_threshold = cfg.monitoring.confidence_threshold;
 
     info!(
         threshold = pol.execution.confidence_threshold,

@@ -246,28 +246,18 @@
     </div>
   </div>
 
-  <!-- Available app updates -->
+  <!-- Available app updates (winget + AI-checked apps winget can't manage) -->
   <div class="card" id="updates-card">
     <div class="card-header collapsible">
       <span class="chev">▾</span>Available Updates <span class="upd-count" id="updates-count"></span>
       <span class="hspacer"></span>
       <button class="upd-btn" id="upd-refresh">Refresh</button>
       <button class="upd-btn upd-all" id="upd-all" style="display:none">Update all</button>
-    </div>
-    <div class="card-body" id="updates-list">
-      <div class="empty">Checking for updates…</div>
-    </div>
-  </div>
-
-  <!-- Other updates (AI-checked, apps winget can't manage) -->
-  <div class="card" id="ai-updates-card">
-    <div class="card-header collapsible">
-      <span class="chev">▾</span>Other Updates <span class="upd-count" id="ai-updates-count"></span>
-      <span class="hspacer"></span>
       <button class="upd-btn" id="ai-check-btn">Check other apps</button>
     </div>
-    <div class="card-body" id="ai-updates-list">
-      <div class="empty">Apps not covered by winget — click “Check other apps” (uses a little AI).</div>
+    <div class="card-body">
+      <div id="updates-list"><div class="empty">Checking for updates…</div></div>
+      <div id="ai-updates-list"></div>
     </div>
   </div>
 
@@ -314,6 +304,8 @@
         <input id="set-an-key" type="password" autocomplete="off">
         <label for="set-base">Base URL</label>
         <input id="set-base" type="text" placeholder="(openai_compatible only)">
+        <label for="set-conf">Auto-fix confidence (%)</label>
+        <input id="set-conf" type="number" min="50" max="95" step="5" placeholder="80">
         <label for="set-decint">Decision interval (s)</label>
         <input id="set-decint" type="number" min="10">
         <label for="set-elpoll">Event-log poll (s)</label>
