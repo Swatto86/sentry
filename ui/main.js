@@ -469,15 +469,11 @@ async function saveSettings() {
   // that can't start. Catch the common cases here with a clear message instead
   // of a confusing revert to the previous provider.
   const s = (lastStatus && lastStatus.settings) || {};
-  if (settings.provider === 'openrouter') {
-    if (!orKey && !s.openrouter_key_set) {
-      st.textContent = 'OpenRouter needs an API key — enter one above, then Save.';
-      return;
-    }
-    if (!settings.model) {
-      st.textContent = 'OpenRouter needs a model — e.g. nvidia/nemotron-3-super-120b-a12b:free';
-      return;
-    }
+  // OpenRouter: a blank model means the free auto-routing model. Don't hard-block
+  // on a missing key — the service can auto-detect one from the OpenRouter CLI
+  // (~/.openrouter/config.json) and will report back if none is found anywhere.
+  if (settings.provider === 'openrouter' && !settings.model) {
+    settings.model = 'openrouter/free';
   }
   if (settings.provider === 'anthropic') {
     if (!anKey && !s.anthropic_key_set) {
