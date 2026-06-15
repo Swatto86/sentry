@@ -275,6 +275,7 @@ fn push_problem(
     action: &str,
     blocked: bool,
     auto_executed: bool,
+    reason: Option<String>,
 ) {
     if st.recent_problems.len() >= 20 {
         st.recent_problems.pop_front();
@@ -285,6 +286,7 @@ fn push_problem(
         action: action.to_string(),
         blocked,
         auto_executed,
+        reason,
     });
 }
 
@@ -640,6 +642,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             &problem.proposed_fix.to_string(),
                             true,
                             false,
+                            Some("unrecognised fix action".into()),
                         );
                         pipe.broadcast_status(build_status(&st, None));
                         continue;
@@ -655,6 +658,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 &format!("{action:?}"),
                                 true,
                                 false,
+                                Some(reason),
                             );
                             pipe.broadcast_status(build_status(&st, None));
                         }
@@ -689,6 +693,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 &format!("{action:?}"),
                                 false,
                                 true,
+                                None,
                             );
                             st.status = "Active".to_string();
                             pipe.broadcast_status(build_status(&st, None));
@@ -745,6 +750,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 &format!("{action:?}"),
                                 false,
                                 approved,
+                                Some(reason),
                             );
                             pipe.broadcast_status(build_status(&st, None));
 

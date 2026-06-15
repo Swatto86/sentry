@@ -91,6 +91,10 @@ pub struct ProblemSummary {
     pub action: String,
     pub blocked: bool,
     pub auto_executed: bool,
+    /// Why it was blocked or held for approval (shown in the UI). None when it
+    /// ran or needs no explanation.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
