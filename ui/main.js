@@ -187,7 +187,7 @@ async function refresh() {
     status.recent_problems,
     p => `<div class="row">
       <div class="row-title">${problemTag(p)}<span>${esc(p.diagnosis)}</span></div>
-      <div class="row-sub">${esc(p.action)}</div>
+      <div class="row-sub">${esc(p.action)}${p.reason ? ' — ' + esc(p.reason) : ''}</div>
     </div>`,
     'No problems detected yet'
   );

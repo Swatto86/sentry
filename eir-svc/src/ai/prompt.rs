@@ -76,6 +76,14 @@ confidence is at least 0.80. If you cannot fix it, or it is benign or expected, 
 report it — leave it out entirely. Do not re-report an issue from the decision history that
 remains unfixable; repeating it adds noise without value.
 
+NEVER propose routine or preventive maintenance with no triggering fault. In particular,
+disk_cleanup is warranted ONLY when free disk space is critically low (under ~10%); do not
+suggest it on a healthy disk. The same applies to log_cleanup and similar housekeeping —
+only when something concrete demands it. A healthy system needs NO action: if your diagnosis
+would be that there are no errors/faults or that the system is fine, that is NOT a problem —
+return an empty problems list. Never emit a problem entry whose diagnosis states the system
+is healthy.
+
 Report at most the 5 most important problems, ordered by severity. If the system is healthy
 or the only findings are benign/unfixable, return an empty problems list. Keep every text
 field to one or two sentences.
