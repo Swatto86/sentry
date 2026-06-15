@@ -59,31 +59,26 @@ impl ExecutionPolicy {
             return Verdict::Block(reason);
         }
 
-        // Absolute floor — don't even prompt below 80%
-        if confidence < 0.80 {
+        // Below the configured confidence threshold — don't run or prompt.
+        let threshold = self.execution.confidence_threshold;
+        if confidence < threshold {
             return Verdict::Block(format!(
-                "Confidence {:.0}% below minimum 80%",
-                confidence * 100.0
+                "Confidence {:.0}% below threshold {:.0}%",
+                confidence * 100.0,
+                threshold * 100.0,
             ));
         }
 
-        // Whitelist check
+        // Not on the auto-execute whitelist — the catastrophic actions
+        // (bcd_edit, driver_disable, powershell_diagnostic) still require
+        // explicit approval regardless of confidence.
         if !self.whitelist.actions.iter().any(|a| a == name) {
             return Verdict::RequireApproval(format!(
-                "Action '{name}' not on auto-execute whitelist"
+                "Action '{name}' needs approval (not auto-executed)"
             ));
         }
 
-        // Auto-execute threshold
-        if confidence >= self.execution.confidence_threshold {
-            Verdict::AutoApprove
-        } else {
-            Verdict::RequireApproval(format!(
-                "Confidence {:.0}% below auto-execute threshold {:.0}%",
-                confidence * 100.0,
-                self.execution.confidence_threshold * 100.0,
-            ))
-        }
+        Verdict::AutoApprove
     }
 
     fn blocked_reason(&self, action: &FixAction) -> Option<String> {

@@ -59,5 +59,10 @@ event_log_poll_interval_secs = 30
 # subscription usage low. Lower it if you want faster reaction to new problems.
 decision_interval_secs = 600
 
+# Minimum AI confidence (0.0–1.0) for a whitelisted, reversible fix to
+# auto-execute; anything below this is blocked. Lower = more autonomous (acts on
+# weaker hunches), higher = more cautious. Editable in the app's Settings panel.
+confidence_threshold = 0.80
+
 [persistence]
 audit_db = "./eir.db"

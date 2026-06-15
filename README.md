@@ -60,13 +60,14 @@ Each decision cycle (default every 10 minutes):
    a healthy machine still reports in. Idle cycles are essentially free.
 3. **Diagnose** — the AI returns a structured list of problems, each with a
    confidence score and a proposed root-cause fix.
-4. **Gate through policy** — findings below 80% confidence and benign Windows noise
-   are dropped; software uninstall is *never* executed; a few catastrophic actions
-   (boot-config edits, driver disabling, arbitrary PowerShell) always require
-   approval.
+4. **Gate through policy** — findings below your confidence threshold (default 80%,
+   adjustable in Settings) and benign Windows noise are dropped; software uninstall
+   is *never* executed; a few catastrophic actions (boot-config edits, driver
+   disabling, arbitrary PowerShell) always require approval.
 5. **Execute** — reversible whitelisted fixes (service restart/start/stop, log/disk
    cleanup, task enable/disable, registry reset, process kill, file delete) run
-   automatically at ≥80% confidence. The rest wait for approval in the tray UI.
+   automatically at or above the confidence threshold. The rest wait for approval
+   in the tray UI.
 
 ## AI providers
 
@@ -87,14 +88,16 @@ CLI it uses the CLI's built-in search (`update_check_model`, default **Haiku**).
 ## Features
 
 - **Autonomous diagnosis & repair** of common Windows faults, root-cause first —
-  reversible fixes run automatically at ≥80% confidence, no babysitting.
+  reversible fixes run automatically, no babysitting.
+- **Tunable autonomy** — set the auto-fix confidence threshold in Settings (default
+  80%): lower to act on weaker hunches, higher to be more cautious.
 - **Approval backstop** — the few genuinely catastrophic actions (boot-config edits,
   driver disabling, arbitrary PowerShell) still require your say-so.
 - **Never-uninstall guarantee** — software removal is a hard-blocked action.
-- **App update monitoring** — surfaces available updates via `winget`, and uses your
-  AI provider's web search (OpenRouter web plugin or Claude) for apps no package
-  manager tracks. Per-app notes let you correct or silence false positives (e.g. for
-  your own self-built apps).
+- **App update monitoring** — one panel: available updates via `winget`, plus a
+  **Check other apps** button that uses your AI provider's web search (OpenRouter web
+  plugin or Claude) for apps no package manager tracks. Per-app notes let you correct
+  or silence false positives (e.g. for your own self-built apps).
 - **Usage transparency** — shows AI calls, tokens, and estimated cost in **GBP**.
   Free models are clearly marked as no-cost.
 - **Self-updating** — signed auto-updates via the GitHub releases feed.

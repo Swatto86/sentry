@@ -77,6 +77,14 @@ pub struct MonitoringConfig {
     pub event_log_poll_interval_secs: u64,
     pub wmi_poll_interval_secs: u64,
     pub decision_interval_secs: u64,
+    /// Minimum AI confidence (0.0–1.0) for a whitelisted fix to auto-execute.
+    /// Overrides the fallback in policy.toml; editable from the app's Settings.
+    #[serde(default = "default_confidence")]
+    pub confidence_threshold: f32,
+}
+
+fn default_confidence() -> f32 {
+    0.80
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -98,6 +106,7 @@ impl Config {
             wmi_poll_interval_secs: self.monitoring.wmi_poll_interval_secs,
             event_log_channels: self.monitoring.event_log_channels.clone(),
             log_directories: self.monitoring.log_directories.clone(),
+            confidence_threshold: self.monitoring.confidence_threshold,
             openrouter_key_set: set(&self.api.openrouter_api_key),
             anthropic_key_set: set(&self.api.anthropic_api_key),
             api_key_set: set(&self.api.api_key),
@@ -127,6 +136,9 @@ impl Config {
         self.monitoring.wmi_poll_interval_secs = u.wmi_poll_interval_secs.max(30);
         self.monitoring.event_log_channels = u.event_log_channels;
         self.monitoring.log_directories = u.log_directories;
+        // Clamp to a sane range: never 0 (would auto-run everything) nor ≥1.0
+        // (would never run anything).
+        self.monitoring.confidence_threshold = u.confidence_threshold.clamp(0.50, 0.95);
     }
 }
 
@@ -193,6 +205,7 @@ audit_db = "./eir.db"
             wmi_poll_interval_secs: 300,
             event_log_channels: vec!["System".into(), "Application".into()],
             log_directories: vec!["C:\\Logs".into()],
+            confidence_threshold: 0.9,
         });
         // Must serialize to TOML the loader can read back (else a settings save bricks the service).
         let serialized = toml::to_string_pretty(&cfg).unwrap();
@@ -204,6 +217,7 @@ audit_db = "./eir.db"
             Some("sk-or-test")
         );
         assert_eq!(reparsed.monitoring.decision_interval_secs, 900);
+        assert_eq!(reparsed.monitoring.confidence_threshold, 0.9);
         assert_eq!(reparsed.api.update_check_model, "claude-haiku-4-5");
         assert_eq!(reparsed.monitoring.event_log_channels.len(), 2);
         // Blank api key keeps the prior value (None here).
