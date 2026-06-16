@@ -72,43 +72,67 @@ pub struct AppUpdate {
     pub available: String,
 }
 
-/// Split a winget table row on runs of 2+ spaces, preserving single spaces that
-/// occur inside a field (e.g. "7-Zip 25.01 (x64)").
-fn split_columns(line: &str) -> Vec<String> {
-    let mut cols = Vec::new();
-    let mut cur = String::new();
-    let mut spaces = 0usize;
-    for ch in line.chars() {
-        if ch == ' ' {
-            spaces += 1;
-        } else {
-            if spaces >= 2 && !cur.is_empty() {
-                cols.push(cur.trim().to_string());
-                cur.clear();
-            } else if spaces == 1 && !cur.is_empty() {
-                cur.push(' ');
+/// The columns a winget table can have, in display order.
+const WINGET_COLUMNS: [&str; 5] = ["Name", "Id", "Version", "Available", "Source"];
+
+/// Locate each column's start (char offset) from the table header. winget aligns
+/// columns to fixed positions under their header labels, so this is far more
+/// robust than splitting on whitespace: winget separates columns with a *single*
+/// space (the wide gaps are just padding to the widest cell), and it truncates
+/// long fields with '…'. Both break a space-run splitter but leave column
+/// positions intact. The header is often prefixed with progress-spinner output
+/// terminated by '\r', so only the text after the last '\r' is considered.
+fn header_offsets(text: &str) -> Vec<(&'static str, usize)> {
+    let header = text
+        .lines()
+        .map(|l| l.rsplit('\r').next().unwrap_or(l))
+        .find(|l| l.contains("Id") && l.contains("Version"));
+    let mut offsets = Vec::new();
+    if let Some(h) = header {
+        for label in WINGET_COLUMNS {
+            if let Some(byte) = h.find(label) {
+                offsets.push((label, h[..byte].chars().count()));
             }
-            spaces = 0;
-            cur.push(ch);
         }
+        offsets.sort_by_key(|&(_, start)| start);
     }
-    if !cur.trim().is_empty() {
-        cols.push(cur.trim().to_string());
-    }
-    cols
+    offsets
 }
 
-/// Parse `winget upgrade` output. Skips the progress-noise and header by starting
-/// after the dashes separator, and stops at the "N upgrades available" footer.
-fn parse_upgrades(text: &str) -> Vec<AppUpdate> {
-    let mut updates = Vec::new();
+/// Read one column's trimmed value from a row. A column spans from its own start
+/// to the next column's start (the last runs to end of line). Returns "" when the
+/// column is absent or starts past the row's end.
+fn column(offsets: &[(&'static str, usize)], row: &[char], label: &str) -> String {
+    let Some(idx) = offsets.iter().position(|&(l, _)| l == label) else {
+        return String::new();
+    };
+    let start = offsets[idx].1;
+    if start >= row.len() {
+        return String::new();
+    }
+    let end = offsets
+        .get(idx + 1)
+        .map(|&(_, s)| s.min(row.len()))
+        .unwrap_or(row.len());
+    row[start..end]
+        .iter()
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Split a winget table into its column offsets and data rows (as char vectors).
+/// Skips the progress-noise and header above the dashed separator, and stops at
+/// the "N upgrades available" footer (and the "explicit targeting" sub-table some
+/// winget versions append).
+fn winget_table(text: &str) -> (Vec<(&'static str, usize)>, Vec<Vec<char>>) {
+    let offsets = header_offsets(text);
+    let mut rows = Vec::new();
     let mut in_table = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if !in_table {
-            // The separator line is a run of dashes (possibly after stray noise).
-            if trimmed.starts_with("---") || trimmed.ends_with("---") || trimmed.contains("-----")
-            {
+            if trimmed.contains("-----") {
                 in_table = true;
             }
             continue;
@@ -116,26 +140,31 @@ fn parse_upgrades(text: &str) -> Vec<AppUpdate> {
         if trimmed.is_empty() {
             continue;
         }
-        // Footer, e.g. "21 upgrades available." — also stops at the "explicit
-        // targeting" sub-table that some winget versions append.
         let lower = trimmed.to_lowercase();
         if lower.contains("upgrade") && lower.contains("available")
             || lower.starts_with("the following packages")
         {
             break;
         }
-        let cols = split_columns(trimmed);
-        if cols.len() < 4 {
-            continue;
-        }
-        let name = cols[0].clone();
-        // Strip the truncation ellipsis winget adds to long ids.
-        let id = cols[1]
+        rows.push(line.chars().collect());
+    }
+    (offsets, rows)
+}
+
+/// Parse `winget upgrade` output into the apps with an available update.
+fn parse_upgrades(text: &str) -> Vec<AppUpdate> {
+    let (offsets, rows) = winget_table(text);
+    let mut updates = Vec::new();
+    for row in &rows {
+        let name = column(&offsets, row, "Name");
+        // Strip the truncation ellipsis winget adds to long ids; winget's `--id`
+        // does substring matching, so the un-truncated prefix still resolves.
+        let id = column(&offsets, row, "Id")
             .trim_end_matches('…')
             .trim_end_matches('.')
             .to_string();
-        let current = cols[2].clone();
-        let available = cols[3].clone();
+        let current = column(&offsets, row, "Version");
+        let available = column(&offsets, row, "Available");
         if id.is_empty() || available.is_empty() {
             continue;
         }
@@ -265,7 +294,7 @@ fn is_noise(name: &str) -> bool {
         "security update",
         "hotfix",
         "maintenance service",
-        ".net",
+        "microsoft .net",
         "directx",
         "realtek",
         "intel(r)",
@@ -281,32 +310,32 @@ fn is_noise(name: &str) -> bool {
     SKIP.iter().any(|s| n.contains(s))
 }
 
-/// Parse `winget list` for apps with no package source — rows that do NOT end in
-/// "winget"/"msstore" can't be updated by winget. Returns (name, version).
+/// Parse `winget list` for apps winget can't manage — rows whose Source is not
+/// "winget"/"msstore". Tolerates winget's '…' column truncation, and skips
+/// MSIX/Store-delivered packages (those update through the Store, not a download).
+/// Returns (name, version).
 fn parse_unmanaged(text: &str) -> Vec<(String, String)> {
+    let (offsets, rows) = winget_table(text);
     let mut apps = Vec::new();
-    let mut in_table = false;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if !in_table {
-            if trimmed.contains("-----") {
-                in_table = true;
-            }
+    for row in &rows {
+        // Source column: winget/msstore rows are handled by the winget panel.
+        // winget can truncate even the source (e.g. "mssto…"), so compare the
+        // ellipsis-stripped token as a prefix of a real source name. The length
+        // guard keeps a blank or short version string from matching.
+        let source = column(&offsets, row, "Source")
+            .trim_end_matches('…')
+            .to_lowercase();
+        if source.len() >= 5 && ["winget", "msstore"].iter().any(|s| s.starts_with(&source)) {
             continue;
         }
-        if trimmed.is_empty() {
+        // MSIX/Store-delivered packages (Windows components, Store apps) update
+        // through the Store, not by downloading an installer — skip them so the
+        // AI check stays focused on real third-party desktop apps.
+        if column(&offsets, row, "Id").starts_with("MSIX\\") {
             continue;
         }
-        let cols = split_columns(trimmed);
-        if cols.len() < 3 {
-            continue;
-        }
-        let last = cols.last().map(|s| s.as_str()).unwrap_or("");
-        if last.eq_ignore_ascii_case("winget") || last.eq_ignore_ascii_case("msstore") {
-            continue; // winget-managed — handled by the winget panel
-        }
-        let name = cols[0].clone();
-        let version = cols[2].clone();
+        let name = column(&offsets, row, "Name");
+        let version = column(&offsets, row, "Version");
         if name.is_empty() || version.is_empty() || is_noise(&name) {
             continue;
         }
@@ -330,7 +359,11 @@ fn strip_fences(s: &str) -> &str {
     for (open, close) in [("```json", "```"), ("```", "```")] {
         if let Some(i) = t.find(open) {
             let after = &t[i + open.len()..];
-            return after.find(close).map(|e| &after[..e]).unwrap_or(after).trim();
+            return after
+                .find(close)
+                .map(|e| &after[..e])
+                .unwrap_or(after)
+                .trim();
         }
     }
     t
@@ -366,7 +399,11 @@ pub async fn check_ai_updates() -> Result<AiCheckResult, String> {
     // 1. Apps winget can't manage.
     let list_out = tokio::task::spawn_blocking(|| {
         std::process::Command::new("winget")
-            .args(["list", "--accept-source-agreements", "--disable-interactivity"])
+            .args([
+                "list",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
     })
@@ -377,7 +414,12 @@ pub async fn check_ai_updates() -> Result<AiCheckResult, String> {
     let notes = load_notes();
     let mut apps = parse_unmanaged(&String::from_utf8_lossy(&list_out.stdout));
     // Drop apps the user has chosen to ignore.
-    apps.retain(|(n, _)| !notes.get(&n.to_lowercase()).map(|x| x.ignore).unwrap_or(false));
+    apps.retain(|(n, _)| {
+        !notes
+            .get(&n.to_lowercase())
+            .map(|x| x.ignore)
+            .unwrap_or(false)
+    });
     let total = apps.len();
     let mut note = None;
     if apps.len() > AI_CHECK_CAP {
@@ -469,7 +511,9 @@ async fn run_ai_check(prompt: String) -> Result<(Vec<AiUpdate>, f64), String> {
     if cfg.provider == "openrouter" {
         let key = cfg.openrouter_api_key.unwrap_or_default();
         if key.trim().is_empty() {
-            return Err("OpenRouter is selected but no API key is set — add it in Settings.".into());
+            return Err(
+                "OpenRouter is selected but no API key is set — add it in Settings.".into(),
+            );
         }
         let model = if cfg.model.trim().is_empty() {
             "openrouter/free".to_string()
@@ -657,17 +701,22 @@ async fn run_claude_check(prompt: String, model: &str) -> Result<(Vec<AiUpdate>,
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("failed to run claude: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to run claude: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
             .await
             .map_err(|e| e.to_string())?;
     }
-    let output = tokio::time::timeout(std::time::Duration::from_secs(420), child.wait_with_output())
-        .await
-        .map_err(|_| "AI check timed out after 7 minutes".to_string())?
-        .map_err(|e| e.to_string())?;
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(420),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "AI check timed out after 7 minutes".to_string())?
+    .map_err(|e| e.to_string())?;
 
     if !output.status.success() {
         // `claude --output-format json` writes its error to stdout, not stderr,
@@ -759,46 +808,157 @@ pub async fn open_url(url: String) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_winget_table_with_spaces_and_truncation() {
-        let sample = "\
-   -    progress noise    Name                Id                  Version    Available    Source
------------------------------------------------------------------------------------------------
-7-Zip 25.01 (x64)         7zip.7zip           25.01      26.01        winget
-Visual Studio Build Tools 2022    Microsoft.VisualStudio.2022.Buil…   17.14.25 (January 2026)    17.14.34    winget
-21 upgrades available.";
-        let ups = parse_upgrades(sample);
-        assert_eq!(ups.len(), 2);
-        assert_eq!(ups[0].id, "7zip.7zip");
-        assert_eq!(ups[0].name, "7-Zip 25.01 (x64)");
-        assert_eq!(ups[0].available, "26.01");
-        // Ellipsis stripped from the truncated id.
-        assert_eq!(ups[1].id, "Microsoft.VisualStudio.2022.Buil");
-        assert_eq!(ups[1].current, "17.14.25 (January 2026)");
+    /// Render a winget-style fixed-width table from explicit column widths, a
+    /// header, and data rows. Mirrors winget exactly: columns are left-aligned and
+    /// joined by a single space (so when a field fills its column the gap is one
+    /// space — the layout that defeats whitespace splitting), and any field longer
+    /// than its column is truncated with a trailing '…'.
+    fn render(widths: &[usize], header: &[&str], rows: &[&[&str]]) -> String {
+        fn line(widths: &[usize], fields: &[&str]) -> String {
+            let cells: Vec<String> = fields
+                .iter()
+                .enumerate()
+                .map(|(c, &f)| {
+                    let w = widths[c];
+                    if f.chars().count() > w {
+                        f.chars().take(w - 1).collect::<String>() + "…"
+                    } else {
+                        format!("{f:<w$}")
+                    }
+                })
+                .collect();
+            cells.join(" ").trim_end().to_string()
+        }
+        let total: usize = widths.iter().sum::<usize>() + widths.len().saturating_sub(1);
+        let mut out = line(widths, header);
+        out.push('\n');
+        out.push_str(&"-".repeat(total));
+        for r in rows {
+            out.push('\n');
+            out.push_str(&line(widths, r));
+        }
+        out
     }
 
     #[test]
-    fn unmanaged_apps_exclude_winget_managed_and_noise() {
-        let sample = "\
-Name                       Id                              Version       Available   Source
--------------------------------------------------------------------------------------------
-7-Zip 25.01 (x64)          7zip.7zip                       25.01         26.01       winget
-Git                        ARP\\Machine\\X64\\Git_is1          2.52.0
-NVIDIA Graphics Driver     ARP\\Machine\\X64\\{B2FE1952}       596.49
-NVIDIA App                 ARP\\Machine\\X64\\{NVAPP0001}      11.0.5.260
-LibreOffice 25.8           ARP\\Machine\\X64\\{LO258000}       25.8.1
-iCloud Outlook             ARP\\Machine\\X64\\{81FA1580}       15.7.0.56";
-        let apps = parse_unmanaged(sample);
+    fn header_offsets_ignore_progress_spinner_noise() {
+        // winget prefixes the header with carriage-return-overwritten spinner text;
+        // only the text after the last '\r' is the real header.
+        let noisy = "  -  \r  \\  \rName    Id      Version  Source";
+        let clean = "Name    Id      Version  Source";
+        assert_eq!(header_offsets(noisy), header_offsets(clean));
+        assert_eq!(header_offsets(clean).first(), Some(&("Name", 0)));
+    }
+
+    #[test]
+    fn parse_upgrades_handles_single_space_columns() {
+        // Every field fills its column, so winget separates them with a single
+        // space — the narrow layout that previously parsed to zero upgrades.
+        let widths = [11, 14, 7, 9, 6];
+        let header = ["Name", "Id", "Version", "Available", "Source"];
+        let table = render(
+            &widths,
+            &header,
+            &[
+                &[
+                    "Copilot CLI",
+                    "GitHub.Copilot",
+                    "v1.0.44",
+                    "v1.0.63",
+                    "winget",
+                ],
+                &["7-Zip", "7zip.7zip", "25.01", "26.01", "winget"],
+            ],
+        );
+        let table = format!("{table}\n2 upgrades available.");
+        let ups = parse_upgrades(&table);
+        assert_eq!(ups.len(), 2);
+        assert_eq!(ups[0].name, "Copilot CLI");
+        assert_eq!(ups[0].id, "GitHub.Copilot");
+        assert_eq!(ups[0].current, "v1.0.44");
+        assert_eq!(ups[0].available, "v1.0.63");
+    }
+
+    #[test]
+    fn parse_upgrades_strips_truncated_id() {
+        // A long id is truncated with '…'; winget's `--id` substring match still
+        // resolves it, so we keep the prefix and drop the ellipsis.
+        let widths = [30, 33, 23, 9, 6];
+        let header = ["Name", "Id", "Version", "Available", "Source"];
+        let table = render(
+            &widths,
+            &header,
+            &[&[
+                "Visual Studio Build Tools 2022",
+                "Microsoft.VisualStudio.2022.BuildTools",
+                "17.14.25 (January 2026)",
+                "17.14.34",
+                "winget",
+            ]],
+        );
+        let ups = parse_upgrades(&table);
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0].name, "Visual Studio Build Tools 2022");
+        assert_eq!(ups[0].id, "Microsoft.VisualStudio.2022.Buil");
+        assert_eq!(ups[0].current, "17.14.25 (January 2026)");
+        assert_eq!(ups[0].available, "17.14.34");
+    }
+
+    #[test]
+    fn unmanaged_classifies_winget_list_rows() {
+        // Id width forces '…' truncation on long ARP/MSIX ids; Source width forces
+        // 'msstore' to truncate to 'mssto…' — both are real winget behaviours.
+        let widths = [22, 30, 18, 6];
+        let header = ["Name", "Id", "Version", "Source"];
+        let table = render(
+            &widths,
+            &header,
+            &[
+                &["7-Zip", "7zip.7zip", "25.01", "winget"], // winget-managed → skip
+                &["iCloud", "9PKTQ5699M62", "15.8.127.0", "msstore"], // store (mssto…) → skip
+                &["Git", "ARP\\Machine\\X64\\Git_is1", "2.52.0", ""], // unmanaged → keep
+                &[
+                    "PSForge",
+                    "ARP\\Machine\\X64\\{2B48800A-5551-4F2F-97F0-2B5B1234ABCD}",
+                    "1.2.18",
+                    "",
+                ], // truncated id, unmanaged → keep (was dropped before)
+                &["Battle.net", "ARP\\Machine\\X86\\Battle.net", "Unknown", ""], // ".net" must not filter it
+                &[
+                    "NVIDIA Graphics Driver",
+                    "ARP\\Machine\\X64\\{B2FE1952-0186-46C3}",
+                    "596.49",
+                    "",
+                ], // driver → noise
+                &[
+                    "AV1 Video Extension",
+                    "MSIX\\Microsoft.AV1VideoExtension_2.0.7.0_x64",
+                    "2.0.7.0",
+                    "",
+                ], // MSIX/Store → skip
+                &[
+                    "Microsoft .NET Runtime",
+                    "ARP\\Machine\\X64\\{DOTNET8}",
+                    "8.0.11",
+                    "",
+                ], // runtime → noise
+            ],
+        );
+        let apps = parse_unmanaged(&table);
         let names: Vec<&str> = apps.iter().map(|(n, _)| n.as_str()).collect();
-        // Kept: real third-party apps, including NVIDIA's app and LibreOffice
-        // (no longer over-filtered by "nvidia"/"office").
+        // Kept: real third-party apps, including one whose long id was truncated.
         assert!(names.contains(&"Git"));
-        assert!(names.contains(&"iCloud Outlook"));
-        assert!(names.contains(&"NVIDIA App"));
-        assert!(names.contains(&"LibreOffice 25.8"));
-        // Excluded: winget-managed (7-Zip) and the actual driver (caught by "driver").
-        assert!(!names.contains(&"7-Zip 25.01 (x64)"));
+        assert!(names.contains(&"PSForge"));
+        assert!(names.contains(&"Battle.net"));
+        let psforge = apps.iter().find(|(n, _)| n == "PSForge").unwrap();
+        assert_eq!(psforge.1, "1.2.18");
+        // Excluded: winget source, truncated msstore source, driver/runtime noise,
+        // and MSIX/Store-delivered packages.
+        assert!(!names.contains(&"7-Zip"));
+        assert!(!names.contains(&"iCloud"));
         assert!(!names.contains(&"NVIDIA Graphics Driver"));
+        assert!(!names.contains(&"AV1 Video Extension"));
+        assert!(!names.contains(&"Microsoft .NET Runtime"));
     }
 
     #[test]
@@ -807,10 +967,16 @@ iCloud Outlook             ARP\\Machine\\X64\\{81FA1580}       15.7.0.56";
         assert_eq!(claude_model_or_haiku(""), "haiku");
         assert_eq!(claude_model_or_haiku("  "), "haiku");
         assert_eq!(claude_model_or_haiku("nex-agi/nex-n2-pro:free"), "haiku");
-        assert_eq!(claude_model_or_haiku("nvidia/nemotron-3-super-120b-a12b:free"), "haiku");
+        assert_eq!(
+            claude_model_or_haiku("nvidia/nemotron-3-super-120b-a12b:free"),
+            "haiku"
+        );
         assert_eq!(claude_model_or_haiku("haiku"), "haiku");
         assert_eq!(claude_model_or_haiku("Sonnet"), "Sonnet");
         assert_eq!(claude_model_or_haiku("opus"), "opus");
-        assert_eq!(claude_model_or_haiku("claude-haiku-4-5"), "claude-haiku-4-5");
+        assert_eq!(
+            claude_model_or_haiku("claude-haiku-4-5"),
+            "claude-haiku-4-5"
+        );
     }
 }
