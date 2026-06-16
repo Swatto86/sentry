@@ -200,63 +200,143 @@ pub async fn list_app_updates() -> Result<Vec<AppUpdate>, String> {
     Ok(parse_upgrades(&text))
 }
 
-/// Run an elevated winget command via UAC, waiting for it to finish.
-async fn run_winget_elevated(args: Vec<String>) -> Result<String, String> {
-    // Build a single-quoted PowerShell argument list; '' escapes a quote.
+/// Unique temp path for staging the elevated script / capturing its output.
+/// pid + a process-lifetime counter keeps concurrent calls from colliding.
+fn temp_file(ext: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("eir-winget-{}-{seq}.{ext}", std::process::id()))
+}
+
+/// Run an elevated winget command via UAC and capture winget's own output.
+///
+/// `Start-Process -Verb RunAs` elevates through ShellExecute, which cannot
+/// redirect the child's stdio — so a bare exit code is all the old code could
+/// surface. Instead the elevated winget writes all its streams to a temp log we
+/// read back, so a failure carries winget's real message (e.g. the portable
+/// "use --force" guard) rather than just a number. Returns (exit_code, output).
+async fn run_winget_elevated_raw(args: Vec<String>) -> Result<(i32, String), String> {
+    tokio::task::spawn_blocking(move || elevated_winget_blocking(args))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn elevated_winget_blocking(args: Vec<String>) -> Result<(i32, String), String> {
+    let log = temp_file("log");
+    let script = temp_file("ps1");
+
+    // Single-quoted PowerShell list ('' escapes a quote); spread into winget via @a.
     let arg_list = args
         .iter()
         .map(|a| format!("'{}'", a.replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(",");
-    let script = format!(
-        "$p = Start-Process winget -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
-         -ArgumentList {arg_list}; exit $p.ExitCode"
+    let log_lit = log.to_string_lossy().replace('\'', "''");
+    // Elevated body: merge every winget stream and write it UTF-8 to the log,
+    // then propagate winget's own exit code. -Encoding utf8 avoids PS5's UTF-16
+    // default so the Rust side reads it cleanly.
+    let inner = format!(
+        "$a=@({arg_list})\r\n\
+         & winget @a *>&1 | Out-File -FilePath '{log_lit}' -Encoding utf8\r\n\
+         exit $LASTEXITCODE\r\n"
     );
-    let status = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status()
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    std::fs::write(&script, inner).map_err(|e| format!("could not stage winget script: {e}"))?;
 
-    if status.success() {
-        Ok("ok".to_string())
-    } else {
-        Err(format!(
-            "winget exited with code {}",
-            status.code().unwrap_or(-1)
-        ))
+    let script_lit = script.to_string_lossy().replace('\'', "''");
+    // Unelevated launcher: trigger the UAC prompt, wait, and pass the code back.
+    // A declined prompt throws — report it as ERROR_CANCELLED (1223), not a crash.
+    let outer = format!(
+        "try {{ $p = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden \
+         -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{script_lit}'; \
+         exit $p.ExitCode }} catch {{ exit 1223 }}"
+    );
+    let status = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &outer])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| e.to_string())?;
+
+    let captured = std::fs::read(&log)
+        .map(|b| {
+            String::from_utf8_lossy(&b)
+                .trim_start_matches('\u{feff}')
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(&script);
+
+    Ok((status.code().unwrap_or(-1), captured))
+}
+
+/// The full `winget upgrade` argument list for a target (an `--id <id>` pair or
+/// `--all`), optionally forcing past the portable-integrity check.
+fn upgrade_args(target: &[String], force: bool) -> Vec<String> {
+    let mut a = vec!["upgrade".to_string()];
+    a.extend(target.iter().cloned());
+    a.extend([
+        "--silent".to_string(),
+        "--accept-package-agreements".to_string(),
+        "--accept-source-agreements".to_string(),
+        "--disable-interactivity".to_string(),
+    ]);
+    if force {
+        a.push("--force".to_string());
     }
+    a
+}
+
+/// winget refused because a portable package's files changed after install — its
+/// documented remedy is to re-run with --force. Self-updating CLIs (e.g. the
+/// GitHub Copilot CLI, `GitHub.Copilot`) trip this on every upgrade.
+fn portable_modified(output: &str) -> bool {
+    let l = output.to_lowercase();
+    l.contains("has been modified") && l.contains("--force")
+}
+
+/// Turn an (exit code, output) pair into a user-facing result, keeping winget's
+/// own message on failure so the UI/logs can show *why* it failed.
+fn winget_outcome(code: i32, output: &str) -> Result<String, String> {
+    if code == 0 {
+        return Ok(if output.is_empty() {
+            "ok".to_string()
+        } else {
+            output.to_string()
+        });
+    }
+    if code == 1223 {
+        return Err("update cancelled at the UAC prompt".to_string());
+    }
+    let detail: String = output.chars().take(600).collect();
+    if detail.is_empty() {
+        Err(format!("winget exited with code {code}"))
+    } else {
+        Err(format!("winget failed (code {code}): {detail}"))
+    }
+}
+
+/// Run an elevated `winget upgrade`, retrying once with --force if the package is
+/// a portable whose files were modified after install (the only case --force is
+/// auto-applied — a click on "Update" is unambiguous intent to take the version).
+async fn run_winget_upgrade(target: Vec<String>) -> Result<String, String> {
+    let (code, out) = run_winget_elevated_raw(upgrade_args(&target, false)).await?;
+    if code != 0 && portable_modified(&out) {
+        let (code, out) = run_winget_elevated_raw(upgrade_args(&target, true)).await?;
+        return winget_outcome(code, &out);
+    }
+    winget_outcome(code, &out)
 }
 
 #[tauri::command]
 pub async fn update_app(id: String) -> Result<String, String> {
-    run_winget_elevated(vec![
-        "upgrade".into(),
-        "--id".into(),
-        id,
-        "--silent".into(),
-        "--accept-package-agreements".into(),
-        "--accept-source-agreements".into(),
-        "--disable-interactivity".into(),
-    ])
-    .await
+    run_winget_upgrade(vec!["--id".to_string(), id]).await
 }
 
 #[tauri::command]
 pub async fn update_all_apps() -> Result<String, String> {
-    run_winget_elevated(vec![
-        "upgrade".into(),
-        "--all".into(),
-        "--silent".into(),
-        "--accept-package-agreements".into(),
-        "--accept-source-agreements".into(),
-        "--disable-interactivity".into(),
-    ])
-    .await
+    run_winget_upgrade(vec!["--all".to_string()]).await
 }
 
 // ── AI update check (apps winget can't manage) ───────────────────────────────
@@ -959,6 +1039,46 @@ mod tests {
         assert!(!names.contains(&"NVIDIA Graphics Driver"));
         assert!(!names.contains(&"AV1 Video Extension"));
         assert!(!names.contains(&"Microsoft .NET Runtime"));
+    }
+
+    #[test]
+    fn portable_modified_detects_the_force_guard() {
+        // The exact line winget prints for a self-updating portable (Copilot CLI).
+        let out = "Starting package install...\n\
+                   Unable to remove Portable package as it has been modified; \
+                   to override this check use --force";
+        assert!(portable_modified(out));
+        // Unrelated failures must not trigger the --force retry.
+        assert!(!portable_modified("Installer failed with exit code: 1603"));
+        assert!(!portable_modified("No applicable upgrade found."));
+    }
+
+    #[test]
+    fn upgrade_args_appends_force_only_when_asked() {
+        let target = vec!["--id".to_string(), "GitHub.Copilot".to_string()];
+        let plain = upgrade_args(&target, false);
+        assert_eq!(plain.first().map(String::as_str), Some("upgrade"));
+        assert!(plain.iter().any(|a| a == "GitHub.Copilot"));
+        assert!(!plain.iter().any(|a| a == "--force"));
+        assert!(upgrade_args(&target, true).iter().any(|a| a == "--force"));
+    }
+
+    #[test]
+    fn winget_outcome_maps_codes_to_messages() {
+        // Success returns winget's text (or "ok" when it printed nothing).
+        assert_eq!(winget_outcome(0, "").unwrap(), "ok");
+        assert_eq!(
+            winget_outcome(0, "Successfully installed").unwrap(),
+            "Successfully installed"
+        );
+        // A declined UAC prompt is reported as a cancellation, not a raw code.
+        assert_eq!(
+            winget_outcome(1223, "").unwrap_err(),
+            "update cancelled at the UAC prompt"
+        );
+        // Other failures keep winget's own message so the UI can show why.
+        let err = winget_outcome(-1, "0x8a150057 : the package is pinned").unwrap_err();
+        assert!(err.contains("the package is pinned"));
     }
 
     #[test]

@@ -17,8 +17,10 @@ pub fn build(
     let feedback_section = match feedback_summary {
         Some(s) if !s.is_empty() && s != "No execution history yet." => format!(
             "\nRECENT EXECUTION FEEDBACK (calibrate confidence from past outcomes):\n{s}\n\
-             If a similar action failed before, lower confidence. \
-             If it improved the system, raise it.\n"
+             A FAILURE line includes the error in [reason: ...] — read it: if it shows the \
+             fix can't work as posed (wrong name/path, access denied, not found), do NOT \
+             re-propose the same action; choose a different remedy or leave it out. \
+             If a similar action failed before, lower confidence; if it improved the system, raise it.\n"
         ),
         _ => String::new(),
     };

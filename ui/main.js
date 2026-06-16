@@ -278,7 +278,8 @@ async function updateOne(id, btn) {
   try {
     await invoke('update_app', { id });
   } catch (e) {
-    if (btn) btn.textContent = 'Failed';
+    // Surface winget's real reason (hover for full text) instead of a bare "Failed".
+    if (btn) { btn.textContent = 'Failed'; btn.title = String(e); }
     console.error('update_app failed', e);
     updatesBusy = false;
     return;
@@ -295,7 +296,11 @@ async function updateAll() {
   try {
     await invoke('update_all_apps');
   } catch (e) {
+    // Keep the reason visible (hover for full text); don't reload, which would wipe it.
     console.error('update_all_apps failed', e);
+    btn.disabled = false; btn.textContent = 'Failed'; btn.title = String(e);
+    updatesBusy = false;
+    return;
   }
   updatesBusy = false;
   btn.disabled = false; btn.textContent = 'Update all';

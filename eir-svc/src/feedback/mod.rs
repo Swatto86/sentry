@@ -88,12 +88,33 @@ fn improvement_score(
     cpu_delta * 0.3 + mem_delta * 0.3 + fs_delta * 10.0
 }
 
-/// Human-readable summary of recent execution outcomes for the AI prompt.
+/// Collapse a fix's raw output into a single short clause for the AI prompt:
+/// whitespace-normalised and capped, so a failure reason is visible without
+/// dumping a multi-line stack trace into every future prompt.
+fn condense_reason(output: &str) -> Option<String> {
+    let one_line = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return None;
+    }
+    const CAP: usize = 200;
+    let reason = if one_line.chars().count() > CAP {
+        format!("{}…", one_line.chars().take(CAP).collect::<String>())
+    } else {
+        one_line
+    };
+    Some(reason)
+}
+
+/// Human-readable summary of recent execution outcomes for the AI prompt. For
+/// FAILUREs it includes the actual error text (joined from execution_log) so the
+/// model can reason about *why* a fix failed — not just that it did — and pick a
+/// different remedy next cycle instead of re-proposing the same failing action.
 pub async fn recent_summary(pool: &SqlitePool, limit: i64) -> Result<String> {
     let rows = sqlx::query(
-        "SELECT action, succeeded, improvement_score, recorded_at
-         FROM execution_feedback
-         ORDER BY id DESC LIMIT ?",
+        "SELECT f.action, f.succeeded, f.improvement_score, f.recorded_at, e.output
+         FROM execution_feedback f
+         LEFT JOIN execution_log e ON e.id = f.execution_log_id
+         ORDER BY f.id DESC LIMIT ?",
     )
     .bind(limit)
     .fetch_all(pool)
@@ -109,16 +130,30 @@ pub async fn recent_summary(pool: &SqlitePool, limit: i64) -> Result<String> {
         let succeeded: i64 = row.try_get("succeeded")?;
         let improvement: Option<f64> = row.try_get("improvement_score")?;
         let ts: String = row.try_get("recorded_at")?;
+        let output: Option<String> = row.try_get("output")?;
         let short_ts = &ts[..ts.len().min(16)];
 
-        let outcome = if succeeded != 0 { "SUCCESS" } else { "FAILURE" };
+        let succeeded = succeeded != 0;
+        let outcome = if succeeded { "SUCCESS" } else { "FAILURE" };
         let delta_str = match improvement {
             Some(s) if s > 1.0 => format!(", improved (+{s:.1})"),
             Some(s) if s < -1.0 => format!(", degraded ({s:.1})"),
             Some(_) => ", no measurable change".to_string(),
             None => " (pending next cycle measurement)".to_string(),
         };
-        lines.push(format!("- {short_ts}: {action} -> {outcome}{delta_str}"));
+        // The error text is what the model needs to avoid repeating a bad fix.
+        let reason = if succeeded {
+            String::new()
+        } else {
+            output
+                .as_deref()
+                .and_then(condense_reason)
+                .map(|r| format!(" [reason: {r}]"))
+                .unwrap_or_default()
+        };
+        lines.push(format!(
+            "- {short_ts}: {action} -> {outcome}{delta_str}{reason}"
+        ));
     }
 
     Ok(lines.join("\n"))
