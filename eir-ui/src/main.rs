@@ -204,6 +204,9 @@ fn main() {
         .setup(move |app| {
             let icon_base = Arc::new(decode_icon());
 
+            // Remove any installer staging dirs left by a previous run.
+            updates::cleanup_stale_stage_dirs();
+
             // Background auto-update: check on startup, then every 6 hours.
             // If a newer signed release exists, download, install, and relaunch.
             spawn_update_checker(app.handle().clone());
@@ -294,6 +297,10 @@ fn main() {
             updates::list_app_updates,
             updates::update_app,
             updates::update_all_apps,
+            updates::update_everything,
+            updates::install_ai_app,
+            updates::plan_app_install,
+            updates::verify_app_version,
             updates::check_ai_updates,
             updates::check_app_update,
             updates::gbp_per_usd,

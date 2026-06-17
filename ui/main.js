@@ -272,15 +272,95 @@ async function decide(id, approved, card) {
   }
 }
 
-// ── Available app updates (winget) ──────────────────────────────────────────
+// ── Available app updates (winget + AI-driven) ──────────────────────────────
 
 let updatesBusy = false;
+
+// Escape a value for use inside a double-quoted HTML attribute.
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+
+// Find an update row (winget or AI) by its stable key.
+function rowByKey(key) {
+  return [...document.querySelectorAll('.upd-row')].find(r => r.dataset.key === key) || null;
+}
+
+// A coloured badge summarising one app's update outcome.
+function outcomeBadge(o) {
+  if (o.method === 'manual')         return '<span class="upd-badge tag-warn">Manual</span>';
+  if (!o.success)                    return '<span class="upd-badge tag-block">Failed</span>';
+  if (o.verification === 'verified') return '<span class="upd-badge tag-ok">Verified</span>';
+  if (o.verification === 'mismatch') return '<span class="upd-badge tag-block">Not updated</span>';
+  return '<span class="upd-badge tag-warn">Installed (unverified)</span>';
+}
+
+const PHASE_TEXT = {
+  planning: 'finding installer…', downloading: 'downloading…',
+  installing: 'installing…', verifying: 'verifying…', done: '', failed: '',
+};
+
+// Live per-row phase from the service's 'update-progress' events.
+function applyPhase(key, phase) {
+  if (!key || key === '*') return;
+  const row = rowByKey(key);
+  if (!row) return;
+  const s = row.querySelector('.upd-status');
+  if (s && !s.querySelector('.upd-badge')) s.textContent = PHASE_TEXT[phase] ?? phase;
+}
+
+// Render a finished AppOutcome onto its row: badge in the status slot, the Update
+// button removed, and a one-line detail beneath.
+function renderOutcome(o) {
+  const row = rowByKey(o.key);
+  if (!row) return;
+  const actions = row.querySelector('.upd-actions');
+  if (actions) actions.textContent = '';
+  // Drop the AI row's Re-check/Note/Ignore buttons (siblings of .upd-actions) so
+  // a later click can't replace the row and wipe this result.
+  row.querySelectorAll('.upd-mini').forEach(b => b.remove());
+  const status = row.querySelector('.upd-status');
+  if (status) status.innerHTML = outcomeBadge(o);
+  let res = row.querySelector('.upd-result');
+  if (!res) { res = document.createElement('span'); res.className = 'upd-result'; row.appendChild(res); }
+  const ver = o.to ? `now ${o.to}` : '';
+  res.textContent = [o.detail, o.signature, ver].filter(Boolean).join(' · ');
+}
+
+function showSummary(outcomes) {
+  const sum = document.getElementById('upd-summary');
+  sum.style.display = 'block';
+  sum.style.whiteSpace = 'pre-wrap';
+  if (!outcomes || !outcomes.length) { sum.textContent = 'Nothing to update.'; return; }
+  let verified = 0, unverified = 0, failed = 0, manual = 0;
+  for (const o of outcomes) {
+    if (o.method === 'manual') manual++;
+    else if (!o.success) failed++;
+    else if (o.verification === 'verified') verified++;
+    else unverified++;
+  }
+  const head = [
+    verified   && `${verified} verified`,
+    unverified && `${unverified} installed (unverified)`,
+    failed     && `${failed} failed`,
+    manual     && `${manual} need manual install`,
+  ].filter(Boolean).join(' · ') || 'done';
+  const lines = outcomes.map(o => {
+    const tag = o.method === 'manual' ? 'manual'
+      : !o.success ? 'failed'
+      : o.verification === 'verified' ? 'verified' : 'unverified';
+    return `${o.name}: ${tag}${o.detail ? ' — ' + o.detail : ''}`;
+  });
+  sum.textContent = `${head}\n${lines.join('\n')}`;
+}
 
 async function loadUpdates() {
   const list = document.getElementById('updates-list');
   const countEl = document.getElementById('updates-count');
   const allBtn = document.getElementById('upd-all');
-  if (updatesBusy) return;
+  // Don't refresh (and wipe result badges) while any update/install is running.
+  if (updatesBusy || aiBusy) return;
+  // Clear any stale "update everything" summary from a previous run.
+  const sum = document.getElementById('upd-summary');
+  if (sum) { sum.style.display = 'none'; sum.textContent = ''; }
   list.innerHTML = '<div class="empty">Checking for updates…</div>';
   try {
     const ups = await invoke('list_app_updates');
@@ -291,10 +371,12 @@ async function loadUpdates() {
       return;
     }
     list.innerHTML = ups.map(u => `
-      <div class="upd-row">
-        <span class="upd-name" title="${esc(u.id)}">${esc(u.name)}</span>
+      <div class="upd-row" data-key="${escAttr(u.id)}" data-id="${escAttr(u.id)}"
+           data-name="${escAttr(u.name)}" data-current="${escAttr(u.current)}" data-available="${escAttr(u.available)}">
+        <span class="upd-name" title="${escAttr(u.id)}">${esc(u.name)}</span>
         <span class="upd-ver">${esc(u.current)} → ${esc(u.available)}</span>
-        <button class="upd-update" data-id="${esc(u.id)}">Update</button>
+        <span class="upd-actions"><button class="upd-update">Update</button></span>
+        <span class="upd-status"></span>
       </div>`).join('');
   } catch (e) {
     list.innerHTML = `<div class="empty">${esc(String(e))}</div>`;
@@ -303,40 +385,77 @@ async function loadUpdates() {
   }
 }
 
-async function updateOne(id, btn) {
-  if (updatesBusy) return;
+async function updateOne(row, btn) {
+  if (updatesBusy || aiBusy) return;
   updatesBusy = true;
   if (btn) { btn.disabled = true; btn.textContent = 'Updating…'; }
   try {
-    await invoke('update_app', { id });
+    const o = await invoke('update_app', {
+      id: row.dataset.id, name: row.dataset.name,
+      current: row.dataset.current, available: row.dataset.available,
+    });
+    renderOutcome(o);
   } catch (e) {
-    // Surface winget's real reason (hover for full text) instead of a bare "Failed".
-    if (btn) { btn.textContent = 'Failed'; btn.title = String(e); }
+    if (btn) { btn.disabled = false; btn.textContent = 'Failed'; btn.title = String(e); }
     console.error('update_app failed', e);
-    updatesBusy = false;
-    return;
   }
   updatesBusy = false;
-  loadUpdates();
 }
 
 async function updateAll() {
-  if (updatesBusy) return;
+  if (updatesBusy || aiBusy) return;
   updatesBusy = true;
   const btn = document.getElementById('upd-all');
   btn.disabled = true; btn.textContent = 'Updating…';
   try {
-    await invoke('update_all_apps');
+    const outcomes = await invoke('update_all_apps');
+    outcomes.forEach(renderOutcome);
+    showSummary(outcomes);
   } catch (e) {
-    // Keep the reason visible (hover for full text); don't reload, which would wipe it.
     console.error('update_all_apps failed', e);
-    btn.disabled = false; btn.textContent = 'Failed'; btn.title = String(e);
-    updatesBusy = false;
-    return;
+    btn.title = String(e);
   }
+  btn.disabled = false; btn.textContent = 'Update all (winget)';
   updatesBusy = false;
-  btn.disabled = false; btn.textContent = 'Update all';
-  loadUpdates();
+}
+
+// Update EVERYTHING: winget apps (one UAC) then AI-driven installs of non-winget
+// apps (downloaded, then one UAC), each verified. Progress streams in live.
+async function updateEverything() {
+  if (updatesBusy || aiBusy) return;
+  updatesBusy = true; aiBusy = true;
+  const btn = document.getElementById('upd-everything');
+  btn.disabled = true; btn.textContent = 'Updating everything…';
+  const sum = document.getElementById('upd-summary');
+  sum.style.display = 'block'; sum.style.whiteSpace = 'pre-wrap';
+  sum.textContent = 'Updating winget apps, then finding and installing other apps… this can take a few minutes.';
+  try {
+    const outcomes = await invoke('update_everything');
+    outcomes.forEach(renderOutcome);   // updates any visible rows
+    showSummary(outcomes);             // full per-app report
+  } catch (e) {
+    console.error('update_everything failed', e);
+    sum.textContent = 'Update everything failed: ' + String(e);
+  }
+  btn.disabled = false; btn.textContent = '⬆ Update everything';
+  updatesBusy = false; aiBusy = false;
+}
+
+// Install one non-winget app via the AI (plan → download → install → verify).
+async function installAiApp(row, btn) {
+  if (updatesBusy || aiBusy) return;
+  aiBusy = true;
+  if (btn) { btn.disabled = true; btn.textContent = 'Installing…'; }
+  try {
+    const o = await invoke('install_ai_app', {
+      name: row.dataset.name, current: row.dataset.current || '',
+    });
+    renderOutcome(o);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Failed'; btn.title = String(e); }
+    console.error('install_ai_app failed', e);
+  }
+  aiBusy = false;
 }
 
 // Header / approval buttons (wired here rather than inline — Tauri v2 injects a
@@ -354,10 +473,17 @@ document.getElementById('approvals').addEventListener('click', (e) => {
 
 document.getElementById('upd-refresh').addEventListener('click', loadUpdates);
 document.getElementById('upd-all').addEventListener('click', updateAll);
+document.getElementById('upd-everything').addEventListener('click', updateEverything);
 document.getElementById('updates-list').addEventListener('click', (e) => {
   const b = e.target.closest('.upd-update');
-  if (b) updateOne(b.dataset.id, b);
+  if (b) updateOne(b.closest('.upd-row'), b);
 });
+
+// Live per-row progress for any update/install in flight (no polling).
+window.__TAURI__.event.listen('update-progress', (e) => {
+  const p = e.payload || {};
+  applyPhase(p.key, p.phase);
+}).catch(err => console.error('progress subscribe failed', err));
 
 // ── Other updates (AI-checked) ──────────────────────────────────────────────
 
@@ -379,16 +505,17 @@ async function checkAiUpdates() {
       html += '<div class="empty">No updates found for non-winget apps.</div>';
     } else {
       html += r.updates.map(u => `
-        <div class="upd-row" data-name="${esc(u.name)}" data-current="${esc(u.current || '')}">
-          <span class="upd-name" title="${esc(u.name)}">${esc(u.name)}</span>
+        <div class="upd-row" data-key="${escAttr((u.name || '').toLowerCase())}" data-name="${escAttr(u.name)}" data-current="${escAttr(u.current || '')}">
+          <span class="upd-name" title="${escAttr(u.name)}">${esc(u.name)}</span>
           <span class="upd-ver">${esc(u.current || '?')} → ${esc(u.latest)}</span>
-          ${u.url ? `<button class="upd-dl" data-url="${esc(u.url)}">Download</button>` : ''}
+          <span class="upd-actions"><button class="upd-install install-btn">Install</button>${u.url ? `<button class="upd-dl" data-url="${escAttr(u.url)}">Download</button>` : ''}</span>
           <button class="upd-mini recheck-btn">Re-check</button>
           <button class="upd-mini note-btn">Note</button>
           <button class="upd-mini ignore-btn">Ignore</button>
+          <span class="upd-status"></span>
         </div>`).join('');
     }
-    html += `<div class="upd-note">${esc(cost)} · AI-checked — verify before installing.</div>`;
+    html += `<div class="upd-note">${esc(cost)} · AI installs are downloaded, verified, and version-checked. Verify before installing.</div>`;
     list.innerHTML = html;
   } catch (e) {
     list.innerHTML = `<div class="empty">${esc(String(e))}</div>`;
@@ -405,6 +532,9 @@ document.getElementById('ai-updates-list').addEventListener('click', (e) => {
   const row = e.target.closest('.upd-row');
   if (!row) return;
   const name = row.dataset.name;
+  // AI-driven install of this app (plan → download → install → verify)
+  const inst = e.target.closest('.install-btn');
+  if (inst) { installAiApp(row, inst); return; }
   // Ignore: blacklist this app from future AI checks
   if (e.target.closest('.ignore-btn')) {
     invoke('set_app_note', { name, note: '', ignore: true })
@@ -443,13 +573,17 @@ document.getElementById('ai-updates-list').addEventListener('click', (e) => {
     invoke('check_app_update', { name, current }).then(r => {
       if (r.updates && r.updates.length) {
         const u = r.updates[0];
+        // Keep the row's own dataset current so a later Install sends the right version.
+        row.dataset.current = u.current || current || '';
         row.innerHTML =
-          `<span class="upd-name" title="${esc(name)}">${esc(name)}</span>` +
+          `<span class="upd-name" title="${escAttr(name)}">${esc(name)}</span>` +
           `<span class="upd-ver">${esc(u.current || current || '?')} → ${esc(u.latest)} · ~${fmtGbp(r.cost_usd)}</span>` +
-          (u.url ? `<button class="upd-dl" data-url="${esc(u.url)}">Download</button>` : '') +
+          `<span class="upd-actions"><button class="upd-install install-btn">Install</button>` +
+          (u.url ? `<button class="upd-dl" data-url="${escAttr(u.url)}">Download</button>` : '') + `</span>` +
           `<button class="upd-mini recheck-btn">Re-check</button>` +
           `<button class="upd-mini note-btn">Note</button>` +
-          `<button class="upd-mini ignore-btn">Ignore</button>`;
+          `<button class="upd-mini ignore-btn">Ignore</button>` +
+          `<span class="upd-status"></span>`;
       } else {
         row.innerHTML =
           `<span class="upd-name">${esc(name)}</span>` +

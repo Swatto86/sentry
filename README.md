@@ -103,10 +103,14 @@ CLI it uses the CLI's built-in search (`update_check_model`, default **Haiku**).
   cache vs. irreplaceable data). The approval queue is persistent: it never expires
   and survives restarts, so nothing slips away while you're not looking.
 - **Never-uninstall guarantee** — software removal is a hard-blocked action.
-- **App update monitoring** — one panel: available updates via `winget`, plus a
-  **Check other apps** button that uses your AI provider's web search (OpenRouter web
-  plugin or Claude) for apps no package manager tracks. Per-app notes let you correct
-  or silence false positives (e.g. for your own self-built apps).
+- **App updates, applied for you** — one panel updates everything. `winget`-managed
+  apps update in a single batch; apps no package manager tracks are handled by the
+  AI: it finds the official installer via web search, and Eir validates it
+  (https-only, trusted-host/vendor-domain gating, `.exe`/`.msi` only, size-bounded
+  download, SHA-256 + Authenticode recorded), installs it silently, and **verifies
+  the new version is actually installed** — every result shown as Verified / Installed
+  (unverified) / Failed. One **⬆ Update everything** button does the lot; per-app
+  notes still let you correct or silence false positives for your own self-built apps.
 - **Usage transparency** — shows AI calls, tokens, and estimated cost in **GBP**.
   Free models are clearly marked as no-cost.
 - **Self-updating** — signed auto-updates via the GitHub releases feed.

@@ -163,6 +163,18 @@
     .upd-dl { padding: 3px 12px; border: 1px solid var(--green); background: transparent; color: var(--green); border-radius: 6px; cursor: pointer; font-size: 11px; }
     .upd-dl:hover { background: color-mix(in srgb, var(--green) 14%, transparent); }
 
+    /* ── Update actions, results, live phase ── */
+    .upd-everything { border-color: var(--green); color: var(--green); font-weight: 600; }
+    .upd-everything:disabled { opacity: .5; cursor: default; }
+    .upd-install { padding: 3px 12px; border: 1px solid var(--blue); background: transparent; color: var(--blue); border-radius: 6px; cursor: pointer; font-size: 11px; }
+    .upd-install:hover { background: color-mix(in srgb, var(--blue) 14%, transparent); }
+    .upd-install:disabled { opacity: .5; cursor: default; }
+    .upd-status { margin-left: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+    .upd-badge { font-size: 11px; padding: 1px 7px; border-radius: 20px; font-weight: 600; margin-left: 6px; white-space: nowrap; }
+    .upd-result { flex-basis: 100%; padding: 2px 0 0; font-size: 11px; color: var(--muted); white-space: normal; }
+    .upd-row { flex-wrap: wrap; }
+    .upd-summary { display: block; padding: 8px 14px; font-size: 12px; color: var(--text); border-bottom: 1px solid var(--border); }
+
     /* ── Settings ── */
     #settings-card .card-header { display: flex; align-items: center; gap: 8px; cursor: pointer; }
     .set-grid { display: grid; grid-template-columns: 150px 1fr; gap: 8px 12px; padding: 14px; align-items: center; }
@@ -259,10 +271,12 @@
       <span class="chev">▾</span>Available Updates <span class="upd-count" id="updates-count"></span>
       <span class="hspacer"></span>
       <button class="upd-btn" id="upd-refresh">Refresh</button>
-      <button class="upd-btn upd-all" id="upd-all" style="display:none">Update all</button>
+      <button class="upd-btn upd-all" id="upd-all" style="display:none">Update all (winget)</button>
+      <button class="upd-btn upd-everything" id="upd-everything">⬆ Update everything</button>
       <button class="upd-btn" id="ai-check-btn">Check other apps</button>
     </div>
     <div class="card-body">
+      <div id="upd-summary" class="upd-summary" style="display:none"></div>
       <div id="updates-list"><div class="empty">Checking for updates…</div></div>
       <div id="ai-updates-list"></div>
     </div>
