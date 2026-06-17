@@ -686,20 +686,34 @@ pub enum InstallerKind {
 /// Untrusted AI output — never used directly; sanitised by validate_plan.
 #[derive(Deserialize, Default)]
 struct InstallPlanRaw {
-    #[serde(default)]
+    // The prompt tells the model to use `null` for fields it can't fill. serde
+    // refuses `null` for a plain String (which crashed the whole parse), so these
+    // string/array fields accept null|missing as empty via de_null_*.
+    #[serde(default, deserialize_with = "de_null_string")]
     installer_url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_string")]
     releases_url: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_string")]
     expected_version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_vec")]
     silent_args: Vec<String>,
     #[serde(default)]
     sha256: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_null_string")]
     publisher: String,
     #[serde(default)]
     verify_exe: Option<String>,
+}
+
+/// Deserialize a string that the AI may send as JSON `null` (or omit) — both map
+/// to an empty string instead of failing the whole parse.
+fn de_null_string<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
+/// Same null-tolerance for a string array (the AI sometimes sends silent_args: null).
+fn de_null_vec<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
 }
 
 /// A server-validated install plan — the only plan the install pipeline trusts.
@@ -2446,6 +2460,32 @@ mod tests {
         .unwrap();
         assert_eq!(p.kind, InstallerKind::Exe);
         assert_eq!(p.host, "github.com");
+        assert_eq!(p.silent_args, vec!["/S".to_string()]);
+    }
+
+    #[test]
+    fn install_plan_raw_tolerates_null_fields() {
+        // The model is told to use null for fields it can't fill; null on a String
+        // field previously crashed the whole parse ("invalid type: null") and forced
+        // a manual fallback (the AllTheThings symptom).
+        let json = r#"{"installer_url":null,"releases_url":"https://github.com/me/AllTheThings/releases","expected_version":"1.2.3","silent_args":null,"sha256":null,"publisher":null,"verify_exe":null}"#;
+        let r: InstallPlanRaw = serde_json::from_str(json).expect("null fields must parse");
+        assert_eq!(r.installer_url, "");
+        assert!(r.silent_args.is_empty());
+        assert_eq!(r.publisher, "");
+        // No direct URL -> clean manual routing, not a parse crash.
+        assert!(validate_plan(r, "AllTheThings", "1.0.0").is_err());
+    }
+
+    #[test]
+    fn install_plan_raw_null_publisher_still_validates_github() {
+        // A user's own GitHub tool: a direct .exe with null publisher/sha must
+        // validate and be installable, not fall back to manual.
+        let json = r#"{"installer_url":"https://github.com/me/AllTheThings/releases/download/v1.2.3/AllTheThings-setup.exe","releases_url":null,"expected_version":"1.2.3","silent_args":["/S"],"sha256":null,"publisher":null,"verify_exe":null}"#;
+        let r: InstallPlanRaw = serde_json::from_str(json).unwrap();
+        let p = validate_plan(r, "AllTheThings", "1.0.0").expect("github exe should validate");
+        assert_eq!(p.host, "github.com");
+        assert_eq!(p.expected_publisher, None);
         assert_eq!(p.silent_args, vec!["/S".to_string()]);
     }
 

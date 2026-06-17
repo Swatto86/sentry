@@ -1,12 +1,41 @@
 const invoke = window.__TAURI__.core.invoke;
 
+function providerName(p) {
+  return ({
+    openrouter: 'OpenRouter',
+    claude_cli: 'Claude CLI',
+    anthropic: 'Anthropic',
+    openai_compatible: 'OpenAI-compatible',
+  })[p] || p || '';
+}
+
+// Model (and Claude-CLI reasoning effort) used for general issue analysis — the
+// main monitoring/diagnosis loop.
+function analysisLabel(s) {
+  if (!s) return '';
+  let model = (s.model || '').trim();
+  if (!model) {
+    // claude_cli supplies its own default when --model is omitted; openrouter
+    // routes to the free meta-model; others have no default, so be honest.
+    model = s.provider === 'openrouter' ? 'openrouter/free'
+      : s.provider === 'claude_cli' ? 'default model'
+      : '(no model set)';
+  }
+  let label = `${providerName(s.provider)} · ${model}`;
+  // Effort only affects the Claude CLI provider.
+  const effort = (s.effort || '').trim();
+  if (s.provider === 'claude_cli' && effort) label += ` · ${effort} effort`;
+  return label;
+}
+
 // Describe which provider/model the "Other Updates" web check will use. It
 // follows the configured provider: OpenRouter free model + web plugin, or the
 // Claude CLI (update_check_model, blank = haiku).
 function updateCheckLabel(s) {
   if (!s) return '';
   if (s.provider === 'openrouter') {
-    return `OpenRouter · ${s.model || 'openrouter/free'} + web`;
+    const m = (s.model || '').trim() || 'openrouter/free';
+    return `OpenRouter · ${m} + web`;
   }
   const m = (s.update_check_model || '').trim();
   const lower = m.toLowerCase();
@@ -180,12 +209,16 @@ async function refresh() {
     ? `Error: ${status.error}`
     : status.status.replace(/([A-Z])/g, ' $1').trim();
 
-  // Live model label
+  // Live model labels: which model handles issue analysis vs app-update checks.
   const ml = document.getElementById('model-label');
   if (status.settings) {
     const s = status.settings;
-    ml.textContent = s.model ? `${s.provider} · ${s.model}` : `${s.provider} · default model`;
-    ml.title = `Other Updates check: ${updateCheckLabel(s)}`;
+    const analysis = analysisLabel(s);
+    const updates = updateCheckLabel(s);
+    ml.innerHTML =
+      `<span class="ml-line"><span class="ml-key">Analysis</span>${esc(analysis)}</span>` +
+      `<span class="ml-line"><span class="ml-key">Updates</span>${esc(updates)}</span>`;
+    ml.title = `Issue analysis: ${analysis}\nApp-update check: ${updates}`;
   } else {
     ml.textContent = '';
   }

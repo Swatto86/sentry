@@ -192,7 +192,9 @@
     .usage-grid .usage-v { text-align: right; }
     .usage-note { padding: 0 14px 12px; font-size: 11px; color: var(--muted); }
 
-    .model-label { font-size: 11px; color: var(--muted); margin-right: 10px; max-width: 380px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-label { font-size: 10.5px; color: var(--muted); margin-right: 10px; max-width: 460px; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.4; }
+    .model-label .ml-line { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-label .ml-key { color: var(--muted); text-transform: uppercase; letter-spacing: .04em; font-size: 9.5px; margin-right: 5px; opacity: .85; }
 
     /* ── Collapsible cards ── */
     .card-header.collapsible, .analysis-card .card-header { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 6px; }
