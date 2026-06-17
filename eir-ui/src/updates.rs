@@ -428,6 +428,14 @@ pub struct AppOutcome {
     /// Authenticode result for AI installs: "", "signed: <CN>", "unsigned", "untrusted (..)".
     pub signature: String,
     pub cost_usd: f64,
+    /// AI target version + URLs, so an "Update everything" row can offer Download
+    /// / show the target without a fresh (paid) re-check. Empty for winget apps.
+    #[serde(default)]
+    pub latest: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub releases_url: String,
 }
 
 impl AppOutcome {
@@ -443,6 +451,9 @@ impl AppOutcome {
             verification: "not_checked".to_string(),
             signature: String::new(),
             cost_usd: 0.0,
+            latest: String::new(),
+            url: String::new(),
+            releases_url: String::new(),
         }
     }
 }
@@ -1363,6 +1374,9 @@ async fn install_validated_plan(app: &AppHandle, plan: &InstallPlan, cost: f64) 
     let key = plan.name.to_lowercase();
     let mut o = AppOutcome::new(&key, &plan.name, "ai", &plan.current);
     o.cost_usd = cost;
+    o.latest = plan.expected_version.clone();
+    o.url = plan.installer_url.clone();
+    o.releases_url = plan.releases_url.clone().unwrap_or_default();
 
     emit_phase(app, &key, "downloading", 0, 1);
     let staged = match download_and_check(plan).await {
@@ -1436,6 +1450,7 @@ async fn apply_install_result(app: &AppHandle, o: &mut AppOutcome, plan: &Instal
 fn manual_outcome(name: &str, current: &str, cost: f64, detail: String, releases: Option<String>) -> AppOutcome {
     let mut o = AppOutcome::new(&name.to_lowercase(), name, "manual", current);
     o.cost_usd = cost;
+    o.releases_url = releases.clone().unwrap_or_default();
     o.detail = match releases {
         Some(r) => format!("{detail} (releases: {r})"),
         None => detail,
@@ -1556,6 +1571,9 @@ pub async fn update_everything(app: AppHandle) -> Result<Vec<AppOutcome>, String
                         o.cost_usd = cost;
                         o.signature = staged.signature.clone();
                         o.detail = "downloaded".into();
+                        o.latest = plan.expected_version.clone();
+                        o.url = plan.installer_url.clone();
+                        o.releases_url = plan.releases_url.clone().unwrap_or_default();
                         staged_dirs.push(staged.dir.clone());
                         jobs.push(InstallJob {
                             key: id.clone(),
@@ -1570,6 +1588,7 @@ pub async fn update_everything(app: AppHandle) -> Result<Vec<AppOutcome>, String
                     Err(e) => {
                         let mut o = AppOutcome::new(&disp, &up.name, "ai", &up.current);
                         o.cost_usd = cost;
+                        o.latest = up.latest.clone();
                         o.detail = e;
                         emit_phase(&app, &disp, "failed", i, total);
                         ai_outcomes.insert(id, o);
@@ -1582,7 +1601,9 @@ pub async fn update_everything(app: AppHandle) -> Result<Vec<AppOutcome>, String
                     None => reason.unwrap_or_else(|| "no direct installer found".to_string()),
                 };
                 emit_phase(&app, &disp, "failed", i, total);
-                ai_outcomes.insert(id, manual_outcome(&up.name, &up.current, cost, detail, releases));
+                let mut o = manual_outcome(&up.name, &up.current, cost, detail, releases);
+                o.latest = up.latest.clone(); // show current → latest on the row
+                ai_outcomes.insert(id, o);
             }
         }
     }

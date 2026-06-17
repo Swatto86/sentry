@@ -326,6 +326,44 @@ function outcomeBadge(o) {
   return '<span class="upd-badge tag-warn">Installed (unverified)</span>';
 }
 
+// The canonical interactive non-winget app row, shared by "Check other apps" and
+// "Update everything". Always offers Re-check / Note / Ignore so the user can
+// correct the AI (e.g. tell it where to fetch their own tool), and Download when
+// a url (or releases page) is known. Accepts AiUpdate {name,current,latest,url}
+// or an AppOutcome-shaped object {name, from, latest, url, releasesUrl}.
+function aiRow(o) {
+  const name = o.name || '';
+  const current = (o.current != null ? o.current : o.from) || '';
+  const latest = o.latest || '';
+  const url = o.url || o.releasesUrl || '';
+  const ver = `${esc(current || '?')}${latest ? ' → ' + esc(latest) : ''}`;
+  return `
+    <div class="upd-row" data-key="${escAttr(name.toLowerCase())}" data-name="${escAttr(name)}" data-current="${escAttr(current)}">
+      <span class="upd-name" title="${escAttr(name)}">${esc(name)}</span>
+      <span class="upd-ver">${ver}</span>
+      <span class="upd-actions"><button class="upd-install install-btn">Install</button>${url ? `<button class="upd-dl" data-url="${escAttr(url)}">Download</button>` : ''}</span>
+      <button class="upd-mini recheck-btn">Re-check</button>
+      <button class="upd-mini note-btn">Note</button>
+      <button class="upd-mini ignore-btn">Ignore</button>
+      <span class="upd-status"></span>
+    </div>`;
+}
+
+// Materialise interactive rows in #ai-updates-list for any non-winget outcome
+// that doesn't already have a row, so "Update everything" results are actionable
+// (Re-check / Note / Ignore / Download), not just summary text.
+function ensureAiRows(outcomes) {
+  const list = document.getElementById('ai-updates-list');
+  const ai = (outcomes || []).filter(o => o.key !== '__info__' && o.method !== 'winget');
+  if (!ai.length) return;
+  if (!list.querySelector('.upd-row')) list.innerHTML = '';
+  for (const o of ai) {
+    if (rowByKey(o.key)) continue;
+    list.insertAdjacentHTML('beforeend',
+      aiRow({ name: o.name, current: o.from, latest: o.latest, url: o.url, releasesUrl: o.releases_url }));
+  }
+}
+
 const PHASE_TEXT = {
   planning: 'finding installer…', downloading: 'downloading…',
   installing: 'installing…', verifying: 'verifying…', done: '', failed: '',
@@ -340,16 +378,15 @@ function applyPhase(key, phase) {
   if (s && !s.querySelector('.upd-badge')) s.textContent = PHASE_TEXT[phase] ?? phase;
 }
 
-// Render a finished AppOutcome onto its row: badge in the status slot, the Update
-// button removed, and a one-line detail beneath.
+// Render a finished AppOutcome onto its row: badge in the status slot, the now-
+// stale Install/Download actions removed, a one-line detail beneath. The
+// Re-check/Note/Ignore controls are intentionally KEPT so the user can correct a
+// manual/failed result (tell the AI the source, then re-check).
 function renderOutcome(o) {
   const row = rowByKey(o.key);
   if (!row) return;
   const actions = row.querySelector('.upd-actions');
   if (actions) actions.textContent = '';
-  // Drop the AI row's Re-check/Note/Ignore buttons (siblings of .upd-actions) so
-  // a later click can't replace the row and wipe this result.
-  row.querySelectorAll('.upd-mini').forEach(b => b.remove());
   const status = row.querySelector('.upd-status');
   if (status) status.innerHTML = outcomeBadge(o);
   let res = row.querySelector('.upd-result');
@@ -470,7 +507,8 @@ async function updateEverything() {
   sum.textContent = 'Updating winget apps, then finding and installing other apps… this can take a few minutes.';
   try {
     const outcomes = await invoke('update_everything');
-    outcomes.forEach(renderOutcome);   // updates any visible rows
+    ensureAiRows(outcomes);            // create interactive rows for AI/manual apps
+    outcomes.forEach(renderOutcome);   // stamp each result onto its row
     showSummary(outcomes);             // full per-app report
   } catch (e) {
     console.error('update_everything failed', e);
@@ -543,16 +581,7 @@ async function checkAiUpdates() {
     if (!r.updates.length) {
       html += '<div class="empty">No updates found for non-winget apps.</div>';
     } else {
-      html += r.updates.map(u => `
-        <div class="upd-row" data-key="${escAttr((u.name || '').toLowerCase())}" data-name="${escAttr(u.name)}" data-current="${escAttr(u.current || '')}">
-          <span class="upd-name" title="${escAttr(u.name)}">${esc(u.name)}</span>
-          <span class="upd-ver">${esc(u.current || '?')} → ${esc(u.latest)}</span>
-          <span class="upd-actions"><button class="upd-install install-btn">Install</button>${u.url ? `<button class="upd-dl" data-url="${escAttr(u.url)}">Download</button>` : ''}</span>
-          <button class="upd-mini recheck-btn">Re-check</button>
-          <button class="upd-mini note-btn">Note</button>
-          <button class="upd-mini ignore-btn">Ignore</button>
-          <span class="upd-status"></span>
-        </div>`).join('');
+      html += r.updates.map(aiRow).join('');
     }
     html += `<div class="upd-note">${esc(cost)} · AI installs are downloaded, verified, and version-checked. Verify before installing.</div>`;
     list.innerHTML = html;
@@ -612,17 +641,8 @@ document.getElementById('ai-updates-list').addEventListener('click', (e) => {
     invoke('check_app_update', { name, current }).then(r => {
       if (r.updates && r.updates.length) {
         const u = r.updates[0];
-        // Keep the row's own dataset current so a later Install sends the right version.
-        row.dataset.current = u.current || current || '';
-        row.innerHTML =
-          `<span class="upd-name" title="${escAttr(name)}">${esc(name)}</span>` +
-          `<span class="upd-ver">${esc(u.current || current || '?')} → ${esc(u.latest)} · ~${fmtGbp(r.cost_usd)}</span>` +
-          `<span class="upd-actions"><button class="upd-install install-btn">Install</button>` +
-          (u.url ? `<button class="upd-dl" data-url="${escAttr(u.url)}">Download</button>` : '') + `</span>` +
-          `<button class="upd-mini recheck-btn">Re-check</button>` +
-          `<button class="upd-mini note-btn">Note</button>` +
-          `<button class="upd-mini ignore-btn">Ignore</button>` +
-          `<span class="upd-status"></span>`;
+        // Replace the whole row with a fresh interactive one (full controls).
+        row.outerHTML = aiRow({ name, current: u.current || current, latest: u.latest, url: u.url });
       } else {
         row.innerHTML =
           `<span class="upd-name">${esc(name)}</span>` +
