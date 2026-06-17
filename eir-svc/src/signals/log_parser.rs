@@ -29,6 +29,11 @@ const WARN_KEYWORDS: &[&str] = &[
     "unavailable",
 ];
 
+/// Largest raw excerpt of a file we hand to the AI. Big enough to show a small
+/// config/cache file in full, small enough not to bloat the prompt for a large
+/// rolling log (where the keyword snippets carry the signal anyway).
+const MAX_EXCERPT_CHARS: usize = 2500;
+
 /// Parse a log file's content and extract structured diagnostic information.
 pub fn parse(path: &Path, content: &str) -> LogEvent {
     let program = extract_program(path);
@@ -38,6 +43,19 @@ pub fn parse(path: &Path, content: &str) -> LogEvent {
         log_path: path.to_string_lossy().into_owned(),
         severity,
         error_snippets,
+        content_excerpt: excerpt(content),
+    }
+}
+
+/// The first `MAX_EXCERPT_CHARS` characters of the file, with a marker when
+/// truncated so the model knows it is seeing only the head.
+fn excerpt(content: &str) -> String {
+    let trimmed = content.trim();
+    if trimmed.chars().count() <= MAX_EXCERPT_CHARS {
+        trimmed.to_string()
+    } else {
+        let head: String = trimmed.chars().take(MAX_EXCERPT_CHARS).collect();
+        format!("{head}\n…[truncated]")
     }
 }
 

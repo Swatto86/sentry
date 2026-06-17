@@ -77,21 +77,47 @@ function renderList(containerId, items, rowFn, emptyText) {
   el.innerHTML = items.map(rowFn).join('');
 }
 
-function renderApproval(info) {
-  const card = document.getElementById('approval-card');
-  if (!info) { card.style.display = 'none'; return; }
+// Build one approval card. The "What this will do" block and the Reversible/
+// Irreversible flag come from the service's deterministic explainer, so they are
+// trustworthy; side-effects/undo are the AI's supporting commentary.
+function approvalCard(info) {
+  const flag = info.reversible
+    ? '<span class="tag tag-ok">Reversible</span>'
+    : '<span class="tag tag-block">Irreversible — cannot be undone</span>';
+  const details = info.target_details
+    ? `<pre class="appr-details">${esc(info.target_details)}</pre>`
+    : '';
+  const grid = `
+    <span class="label">Diagnosis</span>    <span class="val">${esc(info.diagnosis)}</span>
+    <span class="label">Root cause</span>   <span class="val">${esc(info.root_cause)}</span>
+    <span class="label">Confidence</span>   <span class="val">${Math.round(info.confidence * 100)}%</span>
+    <span class="label">Why approval</span> <span class="val">${esc(info.reason)}</span>
+    <span class="label">Side effects</span> <span class="val">${esc(info.side_effects)}</span>
+    <span class="label">Undo</span>         <span class="val">${esc(info.undo_instructions)}</span>`;
+  return `
+    <div class="approval-card" data-approval-id="${info.id}">
+      <h2>⚠ Approval needed<span class="appr-age">${ago(info.created_at)}</span></h2>
+      <div class="appr-what">
+        <div class="appr-what-label">What this will do</div>
+        <div class="appr-what-text">${esc(info.action_summary || info.action)}</div>
+        <div class="appr-flags">${flag}</div>
+      </div>
+      <div class="appr-target">
+        <span class="appr-target-label">Target</span>
+        <code class="appr-target-val">${esc(info.target || '—')}</code>
+        ${details}
+      </div>
+      <div class="approval-grid">${grid}</div>
+      <div class="approval-actions">
+        <button class="btn-approve" data-id="${info.id}">Approve &amp; run</button>
+        <button class="btn-reject"  data-id="${info.id}">Reject</button>
+      </div>
+    </div>`;
+}
 
-  card.dataset.approvalId = info.id;
-  card.style.display = 'block';
-  document.getElementById('approval-grid').innerHTML = `
-    <span class="label">Diagnosis</span>  <span class="val">${esc(info.diagnosis)}</span>
-    <span class="label">Root cause</span> <span class="val">${esc(info.root_cause)}</span>
-    <span class="label">Confidence</span> <span class="val">${Math.round(info.confidence * 100)}%</span>
-    <span class="label">Action</span>     <span class="val">${esc(info.action)}</span>
-    <span class="label">Reason</span>     <span class="val">${esc(info.reason)}</span>
-    <span class="label">Side effects</span><span class="val">${esc(info.side_effects)}</span>
-    <span class="label">Undo</span>       <span class="val">${esc(info.undo_instructions)}</span>
-  `;
+function renderApprovals(list) {
+  const el = document.getElementById('approvals');
+  el.innerHTML = (list && list.length) ? list.map(approvalCard).join('') : '';
 }
 
 function esc(s) {
@@ -188,8 +214,8 @@ async function refresh() {
     svcCard.style.display = 'none';
   }
 
-  // Approval card
-  renderApproval(status.pending_approval);
+  // Pending approvals (persistent queue — one card each)
+  renderApprovals(status.pending_approvals);
 
   // Problems
   renderList(
@@ -233,11 +259,17 @@ async function togglePause() {
   refresh();
 }
 
-async function decide(approved) {
-  const card = document.getElementById('approval-card');
-  const id = parseInt(card.dataset.approvalId ?? '0', 10);
-  await invoke('decide_approval', { id, approved });
-  card.style.display = 'none';
+// Approve/Reject a specific queued action. Buttons disable on click to avoid a
+// double-submit; the card vanishes on the next status poll once the service has
+// removed it from the queue.
+async function decide(id, approved, card) {
+  if (card) card.querySelectorAll('button').forEach(b => (b.disabled = true));
+  try {
+    await invoke('decide_approval', { id, approved });
+  } catch (e) {
+    console.error('decide_approval failed', e);
+    if (card) card.querySelectorAll('button').forEach(b => (b.disabled = false));
+  }
 }
 
 // ── Available app updates (winget) ──────────────────────────────────────────
@@ -310,8 +342,15 @@ async function updateAll() {
 // Header / approval buttons (wired here rather than inline — Tauri v2 injects a
 // CSP nonce that disables 'unsafe-inline', which would block inline onclick).
 document.getElementById('pause-btn').addEventListener('click', togglePause);
-document.getElementById('approve-btn').addEventListener('click', () => decide(true));
-document.getElementById('reject-btn').addEventListener('click', () => decide(false));
+
+// Approve/Reject buttons are rendered per-card, so delegate from the container.
+document.getElementById('approvals').addEventListener('click', (e) => {
+  const btn = e.target.closest('.btn-approve, .btn-reject');
+  if (!btn) return;
+  const id = parseInt(btn.dataset.id, 10);
+  if (!Number.isFinite(id)) return;
+  decide(id, btn.classList.contains('btn-approve'), btn.closest('.approval-card'));
+});
 
 document.getElementById('upd-refresh').addEventListener('click', loadUpdates);
 document.getElementById('upd-all').addEventListener('click', updateAll);

@@ -13,7 +13,11 @@ pub struct StatusPayload {
     pub last_analysis: String,
     pub recent_problems: Vec<ProblemSummary>,
     pub recent_executions: Vec<ExecutionSummary>,
-    pub pending_approval: Option<ApprovalInfo>,
+    /// Actions awaiting the user's decision. Persisted across cycles and service
+    /// restarts, so an approval never expires out from under the user — it stays
+    /// here until they Approve or Reject it.
+    #[serde(default)]
+    pub pending_approvals: Vec<ApprovalInfo>,
     pub error: Option<String>,
     /// AI usage totals (recorded when the provider reports usage); None if unavailable.
     pub usage: Option<UsageSummary>,
@@ -84,10 +88,33 @@ pub struct ApprovalInfo {
     pub diagnosis: String,
     pub root_cause: String,
     pub confidence: f32,
+    /// Debug rendering of the fix action (e.g. `FileDelete { path: "…" }`).
     pub action: String,
+    /// Why this action needs approval (the policy verdict reason).
     pub reason: String,
+    /// AI's account of what might break.
     pub side_effects: String,
+    /// AI's instructions for reverting the change.
     pub undo_instructions: String,
+    /// Deterministic, plain-English summary of exactly what executing this does —
+    /// derived from the action type, not the AI, so it can be trusted.
+    #[serde(default)]
+    pub action_summary: String,
+    /// The concrete target the action affects (a file path, service, process, …).
+    #[serde(default)]
+    pub target: String,
+    /// Deterministic facts about the target gathered at proposal time (e.g. a
+    /// file's size, last-modified date, and what kind of file it is). Empty when
+    /// the action has no inspectable target. Multi-line.
+    #[serde(default)]
+    pub target_details: String,
+    /// Whether the action can be undone after it runs. Surfaced so the user knows
+    /// when they are approving a one-way door.
+    #[serde(default)]
+    pub reversible: bool,
+    /// Unix timestamp (seconds) when the action was first proposed.
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

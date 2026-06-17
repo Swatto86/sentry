@@ -2,6 +2,7 @@ mod ai;
 mod audit;
 mod config;
 mod executor;
+mod explain;
 mod feedback;
 mod models;
 mod pipe_server;
@@ -9,10 +10,11 @@ mod policy;
 mod safety;
 mod signals;
 
-use models::SignalSnapshot;
+use models::{FixAction, PendingApproval, SignalSnapshot, SystemState};
 use eir_proto::{
     ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg, UiSettings, UsageSummary,
 };
+use sqlx::SqlitePool;
 use std::{
     collections::{HashSet, VecDeque},
     path::PathBuf,
@@ -166,6 +168,9 @@ struct SvcState {
     last_analysis: String,
     recent_problems: VecDeque<ProblemSummary>,
     recent_executions: VecDeque<ExecutionSummary>,
+    /// Actions awaiting the user's decision. Mirrored to the audit DB so the queue
+    /// survives restarts; the user can approve or reject any item at any time.
+    pending: Vec<PendingApproval>,
     status: String,
     error: Option<String>,
     usage: Option<UsageSummary>,
@@ -183,6 +188,7 @@ impl Default for SvcState {
             last_analysis: String::new(),
             recent_problems: VecDeque::new(),
             recent_executions: VecDeque::new(),
+            pending: Vec::new(),
             status: "Initializing".to_string(),
             error: None,
             usage: None,
@@ -206,7 +212,7 @@ fn restart_self() {
         .spawn();
 }
 
-fn build_status(st: &SvcState, pending: Option<ApprovalInfo>) -> StatusPayload {
+fn build_status(st: &SvcState) -> StatusPayload {
     StatusPayload {
         status: st.status.clone(),
         paused: st.paused,
@@ -217,10 +223,51 @@ fn build_status(st: &SvcState, pending: Option<ApprovalInfo>) -> StatusPayload {
         last_analysis: st.last_analysis.clone(),
         recent_problems: st.recent_problems.iter().cloned().collect(),
         recent_executions: st.recent_executions.iter().cloned().collect(),
-        pending_approval: pending,
+        pending_approvals: st.pending.iter().map(|p| p.info.clone()).collect(),
         error: st.error.clone(),
         usage: st.usage.clone(),
         settings: st.settings.clone(),
+    }
+}
+
+/// The status to settle on when not mid-action: paused beats everything, then an
+/// outstanding approval, otherwise active.
+fn resting_status(st: &SvcState) -> String {
+    if st.paused {
+        "Paused"
+    } else if !st.pending.is_empty() {
+        "PendingApproval"
+    } else {
+        "Active"
+    }
+    .to_string()
+}
+
+/// Execute an approved/auto-approved action and record its outcome: the execution
+/// log, the decision's executed flag, and the feedback baseline for measuring
+/// whether the system improved. Shared by the auto-execute and user-approval paths.
+async fn execute_and_record(
+    db: &SqlitePool,
+    st: &mut SvcState,
+    action: &FixAction,
+    decision_id: i64,
+    baseline: &SystemState,
+) {
+    let result = executor::execute(action).await;
+    push_execution(st, &result.action, result.success, &result.output);
+
+    match audit::log_execution(db, decision_id, &result).await {
+        Ok(exec_id) => {
+            if let Err(e) = audit::mark_decision_executed(db, decision_id).await {
+                error!("Failed to mark decision executed: {e}");
+            }
+            if let Err(e) =
+                feedback::record(db, exec_id, &result.action, result.success, baseline).await
+            {
+                error!("Failed to record feedback: {e}");
+            }
+        }
+        Err(e) => error!("Failed to log execution: {e}"),
     }
 }
 
@@ -333,7 +380,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
             error!("{m}");
             st.status = "Error".to_string();
             st.error = Some(m.clone());
-            pipe.broadcast_status(build_status(&st, None));
+            pipe.broadcast_status(build_status(&st));
             return;
         }};
     }
@@ -357,9 +404,10 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     pol.execution.confidence_threshold = cfg.monitoring.confidence_threshold;
 
     info!(
+        version = env!("CARGO_PKG_VERSION"),
         threshold = pol.execution.confidence_threshold,
         rate_limit_mins = pol.execution.rate_limit_mins,
-        "Starting Eir v0.6 — service mode"
+        "Starting Eir — service mode"
     );
 
     let db_path = config::resolve(&cfg.persistence.audit_db);
@@ -407,7 +455,19 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     if let Ok(s) = audit::usage_summary(&db).await {
         st.usage = Some(s);
     }
-    pipe.broadcast_status(build_status(&st, None));
+    // Restore approvals queued before the last restart (e.g. a settings change)
+    // so the user can still act on them — they are not lost on restart.
+    match audit::load_pending_approvals(&db).await {
+        Ok(pending) => {
+            if !pending.is_empty() {
+                info!(count = pending.len(), "Restored pending approvals from previous run");
+            }
+            st.pending = pending;
+        }
+        Err(e) => warn!("Failed to load pending approvals: {e}"),
+    }
+    st.status = resting_status(&st);
+    pipe.broadcast_status(build_status(&st));
 
     let mut ticker = interval(Duration::from_secs(cfg.monitoring.decision_interval_secs));
     info!(
@@ -436,20 +496,16 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         match cmd {
                         UiMsg::TogglePause => {
                             st.paused = !st.paused;
-                            st.status = if st.paused {
-                                "Paused".to_string()
-                            } else {
-                                "Active".to_string()
-                            };
-                            pipe.broadcast_status(build_status(&st, None));
+                            st.status = resting_status(&st);
+                            pipe.broadcast_status(build_status(&st));
                         }
                         UiMsg::ClearProblems => {
                             st.recent_problems.clear();
-                            pipe.broadcast_status(build_status(&st, None));
+                            pipe.broadcast_status(build_status(&st));
                         }
                         UiMsg::ClearExecutions => {
                             st.recent_executions.clear();
-                            pipe.broadcast_status(build_status(&st, None));
+                            pipe.broadcast_status(build_status(&st));
                         }
                         UiMsg::UpdateSettings(update) => {
                             cfg.apply_update(*update);
@@ -462,7 +518,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                     cfg = reloaded; // discard the invalid change
                                 }
                                 st.settings = Some(cfg.to_ui_settings());
-                                pipe.broadcast_status(build_status(&st, None));
+                                pipe.broadcast_status(build_status(&st));
                             } else {
                                 st.settings = Some(cfg.to_ui_settings());
                                 match config::save(&cfg, "config.toml") {
@@ -470,19 +526,68 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                         info!("Settings saved — restarting service to apply");
                                         st.status = "Restarting".to_string();
                                         st.error = None;
-                                        pipe.broadcast_status(build_status(&st, None));
+                                        pipe.broadcast_status(build_status(&st));
                                         restart_self();
                                         return; // SCM stop will follow; exit cleanly now
                                     }
                                     Err(e) => {
                                         error!("Failed to save settings: {e}");
                                         st.error = Some(format!("Save settings: {e}"));
-                                        pipe.broadcast_status(build_status(&st, None));
+                                        pipe.broadcast_status(build_status(&st));
                                     }
                                 }
                             }
                         }
-                        UiMsg::Approve { .. } => {} // resolved in pipe_server
+                        UiMsg::Approve { id, approved } => {
+                            // Resolve a queued approval. Find it, remove it from
+                            // both memory and the DB, then act on the decision.
+                            if let Some(pos) =
+                                st.pending.iter().position(|p| p.info.id == id)
+                            {
+                                let pa = st.pending.remove(pos);
+                                if let Err(e) = audit::delete_pending_approval(&db, id).await {
+                                    warn!("Failed to delete pending approval {id}: {e}");
+                                }
+                                if approved {
+                                    info!(action = ?pa.action, "UI-approved — executing");
+                                    st.status = "Executing".to_string();
+                                    pipe.broadcast_status(build_status(&st));
+                                    execute_and_record(
+                                        &db,
+                                        &mut st,
+                                        &pa.action,
+                                        pa.decision_id,
+                                        &pa.baseline,
+                                    )
+                                    .await;
+                                    push_problem(
+                                        &mut st,
+                                        &pa.info.diagnosis,
+                                        pa.info.confidence,
+                                        &pa.info.action,
+                                        false,
+                                        true,
+                                        Some("approved by user".into()),
+                                    );
+                                } else {
+                                    info!(id, diagnosis = %pa.info.diagnosis, "UI-rejected");
+                                    push_problem(
+                                        &mut st,
+                                        &pa.info.diagnosis,
+                                        pa.info.confidence,
+                                        &pa.info.action,
+                                        false,
+                                        false,
+                                        Some("rejected by user".into()),
+                                    );
+                                }
+                                st.error = None;
+                            }
+                            // Whether resolved or stale, settle the status and
+                            // refresh the UI (the card disappears from the queue).
+                            st.status = resting_status(&st);
+                            pipe.broadcast_status(build_status(&st));
+                        }
                         }
                         continue;
                     }
@@ -543,7 +648,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                     st.disk            = sys.disk_usage_percent;
                     st.failed_services = sys.failed_services.clone();
                 }
-                pipe.broadcast_status(build_status(&st, None));
+                pipe.broadcast_status(build_status(&st));
 
                 // No AI provider configured — keep collecting signals and serving
                 // the UI (so Settings stays usable), but skip analysis.
@@ -576,7 +681,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         st.status = "Active".to_string();
                         st.error = None;
                     }
-                    pipe.broadcast_status(build_status(&st, None));
+                    pipe.broadcast_status(build_status(&st));
                     continue;
                 }
 
@@ -599,7 +704,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             error!("AI analysis failed: {e}");
                             st.status = "Error".to_string();
                             st.error  = Some(format!("AI: {e}"));
-                            pipe.broadcast_status(build_status(&st, None));
+                            pipe.broadcast_status(build_status(&st));
                             continue;
                         }
                     };
@@ -657,7 +762,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             false,
                             Some("unrecognised fix action".into()),
                         );
-                        pipe.broadcast_status(build_status(&st, None));
+                        pipe.broadcast_status(build_status(&st));
                         continue;
                     };
 
@@ -673,7 +778,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 false,
                                 Some(reason),
                             );
-                            pipe.broadcast_status(build_status(&st, None));
+                            pipe.broadcast_status(build_status(&st));
                         }
 
                         policy::Verdict::AutoApprove => {
@@ -694,11 +799,16 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
 
                             info!(action = ?action, "AUTO-EXECUTING");
                             st.status = "Executing".to_string();
-                            pipe.broadcast_status(build_status(&st, None));
+                            pipe.broadcast_status(build_status(&st));
 
-                            let result = executor::execute(&action).await;
-
-                            push_execution(&mut st, &result.action, result.success, &result.output);
+                            execute_and_record(
+                                &db,
+                                &mut st,
+                                &action,
+                                decision_id,
+                                &snapshot.system_state,
+                            )
+                            .await;
                             push_problem(
                                 &mut st,
                                 &problem.diagnosis,
@@ -708,99 +818,74 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 true,
                                 None,
                             );
-                            st.status = "Active".to_string();
-                            pipe.broadcast_status(build_status(&st, None));
-
-                            match audit::log_execution(&db, decision_id, &result).await {
-                                Ok(exec_id) => {
-                                    if let Err(e) =
-                                        audit::mark_decision_executed(&db, decision_id).await
-                                    {
-                                        error!("Failed to mark decision executed: {e}");
-                                    }
-                                    if let Err(e) = feedback::record(
-                                        &db,
-                                        exec_id,
-                                        &result.action,
-                                        result.success,
-                                        &snapshot.system_state,
-                                    )
-                                    .await
-                                    {
-                                        error!("Failed to record feedback: {e}");
-                                    }
-                                }
-                                Err(e) => error!("Failed to log execution: {e}"),
-                            }
+                            st.status = resting_status(&st);
+                            pipe.broadcast_status(build_status(&st));
                         }
 
                         policy::Verdict::RequireApproval(reason) => {
-                            info!(reason = %reason, "Awaiting UI approval");
+                            // Non-blocking: queue the action (persisted to the DB)
+                            // and move on. The user can approve or reject it from
+                            // the UI whenever they like — the loop never stalls and
+                            // the approval never expires out from under them.
+                            let action_label = format!("{action:?}");
+                            if st.pending.iter().any(|p| p.info.action == action_label) {
+                                info!(action = %action_label, "Already awaiting approval — skipping duplicate");
+                                continue;
+                            }
+                            info!(reason = %reason, action = %action_label, "Queued for approval");
 
-                            let id = pipe.next_approval_id();
+                            let explanation = explain::explain(&action);
                             let info = ApprovalInfo {
-                                id,
+                                id: 0, // replaced with the DB row id below
                                 diagnosis:         problem.diagnosis.clone(),
                                 root_cause:        problem.root_cause.clone(),
                                 confidence:        problem.confidence,
-                                action:            format!("{action:?}"),
+                                action:            action_label.clone(),
                                 reason:            reason.clone(),
                                 side_effects:      problem.side_effects.clone(),
                                 undo_instructions: problem.undo_instructions.clone(),
+                                action_summary:    explanation.summary,
+                                target:            explanation.target,
+                                target_details:    explain::target_details(&action),
+                                reversible:        explanation.reversible,
+                                created_at:        chrono::Utc::now().timestamp(),
                             };
 
-                            st.status = "PendingApproval".to_string();
-                            let approval_status = build_status(&st, Some(info.clone()));
-
-                            let approved =
-                                pipe.request_approval(id, approval_status).await;
-
-                            st.status = "Active".to_string();
-                            push_problem(
-                                &mut st,
-                                &problem.diagnosis,
-                                problem.confidence,
-                                &format!("{action:?}"),
-                                false,
-                                approved,
-                                Some(reason),
-                            );
-                            pipe.broadcast_status(build_status(&st, None));
-
-                            if approved {
-                                info!(action = ?action, "UI-approved — executing");
-                                let result = executor::execute(&action).await;
-                                push_execution(
-                                    &mut st,
-                                    &result.action,
-                                    result.success,
-                                    &result.output,
-                                );
-                                pipe.broadcast_status(build_status(&st, None));
-
-                                match audit::log_execution(&db, decision_id, &result).await {
-                                    Ok(exec_id) => {
-                                        if let Err(e) =
-                                            audit::mark_decision_executed(&db, decision_id).await
-                                        {
-                                            error!("Failed to mark decision executed: {e}");
-                                        }
-                                        if let Err(e) = feedback::record(
-                                            &db,
-                                            exec_id,
-                                            &result.action,
-                                            result.success,
-                                            &snapshot.system_state,
-                                        )
-                                        .await
-                                        {
-                                            error!("Failed to record feedback: {e}");
-                                        }
-                                    }
-                                    Err(e) => error!("Failed to log execution: {e}"),
+                            match audit::insert_pending_approval(
+                                &db,
+                                decision_id,
+                                &action,
+                                &info,
+                                &snapshot.system_state,
+                            )
+                            .await
+                            {
+                                Ok(row_id) => {
+                                    let mut info = info;
+                                    info.id = row_id as u64;
+                                    st.pending.push(PendingApproval {
+                                        info,
+                                        action: action.clone(),
+                                        decision_id,
+                                        baseline: snapshot.system_state.clone(),
+                                    });
+                                    st.status = "PendingApproval".to_string();
+                                    pipe.broadcast_status(build_status(&st));
                                 }
-                            } else {
-                                info!(diagnosis = %problem.diagnosis, "Rejected / timed out");
+                                Err(e) => {
+                                    // Don't lose the finding — surface it as a problem.
+                                    error!("Failed to queue approval: {e}");
+                                    push_problem(
+                                        &mut st,
+                                        &problem.diagnosis,
+                                        problem.confidence,
+                                        &action_label,
+                                        true,
+                                        false,
+                                        Some(format!("could not queue for approval: {e}")),
+                                    );
+                                    pipe.broadcast_status(build_status(&st));
+                                }
                             }
                         }
                     }
@@ -808,6 +893,8 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
 
                 let tray_status = if st.paused {
                     "Paused"
+                } else if !st.pending.is_empty() {
+                    "PendingApproval"
                 } else if problems_found {
                     "Warning"
                 } else {
@@ -817,7 +904,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                 if !st.paused {
                     st.status = tray_status;
                 }
-                pipe.broadcast_status(build_status(&st, None));
+                pipe.broadcast_status(build_status(&st));
             }
         } => {}
         _ = shutdown => {

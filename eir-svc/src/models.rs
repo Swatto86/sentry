@@ -40,6 +40,11 @@ pub struct LogEvent {
     pub severity: String,
     /// Up to 5 error excerpts, each with 1 line of context before and 2 after.
     pub error_snippets: Vec<String>,
+    /// A capped raw excerpt of the file's actual content, so the AI can judge the
+    /// finding in context (e.g. tell a benign `"error"` field in a JSON cache from
+    /// genuine corruption) instead of reasoning from keyword-matched lines alone.
+    #[serde(default)]
+    pub content_excerpt: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -161,6 +166,22 @@ pub struct ExecutionResult {
     pub action: String,
     pub success: bool,
     pub output: String,
+}
+
+/// A fix awaiting the user's decision. Carries everything needed to execute it
+/// whenever the user gets around to approving it — and to record feedback once it
+/// runs — so approval is no longer tied to a blocking timeout. Persisted in the
+/// audit DB so it survives idle cycles and service restarts.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    /// What the UI shows; `info.id` is the audit-DB row id.
+    pub info: eir_proto::ApprovalInfo,
+    /// The exact action to run if approved.
+    pub action: FixAction,
+    /// Decision this fix came from, for linking the execution record.
+    pub decision_id: i64,
+    /// System state when proposed, used as the "before" baseline for feedback.
+    pub baseline: SystemState,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

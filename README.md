@@ -66,8 +66,12 @@ Each decision cycle (default every 10 minutes):
    disabling, arbitrary PowerShell) always require approval.
 5. **Execute** — reversible whitelisted fixes (service restart/start/stop, log/disk
    cleanup, task enable/disable, registry reset, process kill, file delete) run
-   automatically at or above the confidence threshold. The rest wait for approval
-   in the tray UI.
+   automatically at or above the confidence threshold. Anything disruptive or
+   irreversible is queued for approval in the tray UI — each item explains, in
+   plain English, exactly what it will do (and, for a file delete, the file's real
+   size, age, and what kind of file it is). The queue is persistent: it never
+   times out and survives a service restart, so an approval is always waiting for
+   you, not gone if you missed a pop-up.
 
 ## AI providers
 
@@ -93,7 +97,11 @@ CLI it uses the CLI's built-in search (`update_check_model`, default **Haiku**).
   80%): lower to act on weaker hunches, higher to be more cautious.
 - **Approval backstop** — disruptive or irreversible actions (closing a program,
   deleting a file, boot-config edits, driver disabling, arbitrary PowerShell) always
-  require your say-so; they're never auto-run.
+  require your say-so; they're never auto-run. Each pending action shows a
+  plain-English summary of what it does, whether it can be undone, and — for a file
+  delete — the target's real size, last-modified date, and likely kind (regenerable
+  cache vs. irreplaceable data). The approval queue is persistent: it never expires
+  and survives restarts, so nothing slips away while you're not looking.
 - **Never-uninstall guarantee** — software removal is a hard-blocked action.
 - **App update monitoring** — one panel: available updates via `winget`, plus a
   **Check other apps** button that uses your AI provider's web search (OpenRouter web

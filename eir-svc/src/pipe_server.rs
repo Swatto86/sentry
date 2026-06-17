@@ -1,16 +1,9 @@
 use eir_proto::{ServiceMsg, StatusPayload, UiMsg, PIPE_NAME};
-use std::{
-    collections::HashMap,
-    ffi::c_void,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-};
+use std::ffi::c_void;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::windows::named_pipe::{PipeMode, ServerOptions},
-    sync::{mpsc, oneshot, watch},
+    sync::{mpsc, watch},
     time::Duration,
 };
 use tracing::{info, warn};
@@ -54,12 +47,8 @@ fn build_pipe_security_descriptor() -> Option<usize> {
     Some(psd.0 as usize)
 }
 
-type Approvals = Arc<Mutex<HashMap<u64, oneshot::Sender<bool>>>>;
-
 pub struct PipeServer {
     status_tx: watch::Sender<StatusPayload>,
-    approvals: Approvals,
-    next_id: Arc<AtomicU64>,
 }
 
 pub fn spawn() -> (PipeServer, mpsc::Receiver<UiMsg>) {
@@ -69,16 +58,12 @@ pub fn spawn() -> (PipeServer, mpsc::Receiver<UiMsg>) {
 fn spawn_named(pipe_name: &'static str) -> (PipeServer, mpsc::Receiver<UiMsg>) {
     let (status_tx, _) = watch::channel(StatusPayload::default());
     let (ui_cmd_tx, ui_cmd_rx) = mpsc::channel::<UiMsg>(8);
-    let approvals: Approvals = Arc::new(Mutex::new(HashMap::new()));
-    let next_id = Arc::new(AtomicU64::new(1));
 
     let srv = PipeServer {
         status_tx: status_tx.clone(),
-        approvals: approvals.clone(),
-        next_id: next_id.clone(),
     };
 
-    tokio::spawn(listener_task(pipe_name, status_tx, ui_cmd_tx, approvals));
+    tokio::spawn(listener_task(pipe_name, status_tx, ui_cmd_tx));
 
     (srv, ui_cmd_rx)
 }
@@ -87,7 +72,6 @@ async fn listener_task(
     pipe_name: &'static str,
     status_tx: watch::Sender<StatusPayload>,
     ui_cmd_tx: mpsc::Sender<UiMsg>,
-    approvals: Approvals,
 ) {
     let sd_ptr = build_pipe_security_descriptor();
     if sd_ptr.is_none() {
@@ -141,7 +125,6 @@ async fn listener_task(
 
         let (reader, mut writer) = tokio::io::split(server);
         let mut status_rx = status_tx.subscribe();
-        let approvals = approvals.clone();
         let ui_cmd_tx = ui_cmd_tx.clone();
 
         // Writer: push current value immediately, then push on every change.
@@ -180,12 +163,9 @@ async fn listener_task(
                     if trimmed.is_empty() {
                         continue;
                     }
+                    // All UI messages — including Approve/Reject — are handled by
+                    // the decision loop, which owns the persistent approval queue.
                     match serde_json::from_str::<UiMsg>(trimmed) {
-                        Ok(UiMsg::Approve { id, approved }) => {
-                            if let Some(tx) = approvals.lock().unwrap().remove(&id) {
-                                let _ = tx.send(approved);
-                            }
-                        }
                         Ok(msg) => {
                             let _ = ui_cmd_tx.send(msg).await;
                         }
@@ -208,26 +188,6 @@ impl PipeServer {
     pub fn broadcast_status(&self, status: StatusPayload) {
         let _ = self.status_tx.send(status);
     }
-
-    /// Broadcasts a status containing the approval request, then waits up to 5 minutes
-    /// for the UI to respond. Returns `false` on timeout or disconnect.
-    pub async fn request_approval(&self, id: u64, status: StatusPayload) -> bool {
-        let (tx, rx) = oneshot::channel::<bool>();
-        self.approvals.lock().unwrap().insert(id, tx);
-        self.broadcast_status(status);
-
-        match tokio::time::timeout(Duration::from_secs(300), rx).await {
-            Ok(Ok(approved)) => approved,
-            _ => {
-                self.approvals.lock().unwrap().remove(&id);
-                false
-            }
-        }
-    }
-
-    pub fn next_approval_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
-    }
 }
 
 #[cfg(test)]
@@ -235,23 +195,19 @@ mod tests {
     use super::*;
     use tokio::net::windows::named_pipe::ClientOptions;
 
-    /// End-to-end: a client connected to the server pipe can approve a pending
-    /// request and unblock `request_approval`. Reproduces the UI → service path.
+    /// A client's Approve message is forwarded to the command channel, where the
+    /// decision loop resolves it against the persistent queue. Reproduces the
+    /// UI → service approval path.
     #[tokio::test]
-    async fn approve_message_resolves_request() {
+    async fn approve_message_is_forwarded_to_command_channel() {
         let name = r"\\.\pipe\EirSvcTestApprove";
-        let (srv, _ui_rx) = spawn_named(name);
+        let (_srv, mut ui_rx) = spawn_named(name);
         // Let the listener create the pipe instance.
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         let client = ClientOptions::new().open(name).expect("client connect");
         // Let the listener's connect() return and its read loop start.
         tokio::time::sleep(Duration::from_millis(150)).await;
-
-        // Service awaits approval for id = 7.
-        let handle =
-            tokio::spawn(async move { srv.request_approval(7, StatusPayload::default()).await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Client sends exactly what the UI serialises for UiMsg::Approve.
         let (_r, mut w) = tokio::io::split(client);
@@ -260,10 +216,16 @@ mod tests {
             .expect("client write");
         w.flush().await.expect("flush");
 
-        let approved = tokio::time::timeout(Duration::from_secs(5), handle)
+        let msg = tokio::time::timeout(Duration::from_secs(5), ui_rx.recv())
             .await
-            .expect("request_approval should resolve, not time out")
-            .expect("task join");
-        assert!(approved, "approval should be true");
+            .expect("Approve should be forwarded, not time out")
+            .expect("command channel open");
+        match msg {
+            UiMsg::Approve { id, approved } => {
+                assert_eq!(id, 7);
+                assert!(approved);
+            }
+            other => panic!("expected Approve, got {other:?}"),
+        }
     }
 }

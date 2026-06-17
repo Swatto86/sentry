@@ -52,7 +52,28 @@ AVAILABLE FIX ACTIONS (use the exact action key and fields shown):
 
 Analyze thoroughly. For each LOG EVENT above, draw on your knowledge of that program's
 known issues and common fixes — including specific registry keys, cache paths, config
-locations, and documented workarounds. Propose the exact fix path for that program.
+locations, and documented workarounds. Use the raw FILE CONTENT excerpt to ground your
+diagnosis in what the file actually contains, then propose the exact fix path for that program.
+
+INVESTIGATE BEFORE YOU ACT — evidence rules:
+  - A key, field, or record literally named "error"/"errors", or values like "error": null
+    or "errors": [], inside a STRUCTURED DATA file (JSON, XML, INI) is NORMAL data, NOT a
+    fault. The presence of the word "error" is not evidence of corruption.
+  - Treat a data/cache file as corrupted ONLY with concrete evidence: the program's OWN log
+    shows it failing to parse/load that specific file, the file is truncated or zero-byte, or
+    the excerpt is clearly malformed (e.g. invalid JSON). Absent that, do NOT propose deleting
+    it — there is no fault to fix.
+  - Match the diagnosis to the evidence you can actually see. If the signals are insufficient
+    to be sure, prefer a read-only diagnostic (powershell_diagnostic) to gather more, or leave
+    the problem out, rather than guessing at a destructive fix.
+
+Before proposing file_delete specifically, BOTH must hold, or do not propose it:
+  (1) The file is a regenerable cache, lock, temp, or crash-dump that the program recreates
+      automatically — never user documents, and never the sole copy of a config whose loss
+      changes behaviour. (Deletion is permanent: the file does NOT go to the Recycle Bin.)
+  (2) There is concrete evidence THIS file is the cause — a parse/load failure naming it, or
+      it being clearly malformed in the excerpt above. A stale or merely large file is not a
+      fault. When unsure, use a diagnostic or leave it out.
 
 Always prefer the least-destructive fix that addresses the ROOT CAUSE: repair or reset
 over removal. Fix the actual fault — clear a corrupted cache, reset a config/registry
@@ -171,6 +192,13 @@ fn format_log_events(snapshot: &SignalSnapshot) -> String {
         for snippet in &ev.error_snippets {
             for line in snippet.lines() {
                 out.push_str(&format!("    {line}\n"));
+            }
+            out.push('\n');
+        }
+        if !ev.content_excerpt.is_empty() {
+            out.push_str("  File content (raw excerpt — judge the finding in context):\n");
+            for line in ev.content_excerpt.lines() {
+                out.push_str(&format!("    | {line}\n"));
             }
             out.push('\n');
         }

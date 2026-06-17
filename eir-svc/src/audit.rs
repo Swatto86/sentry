@@ -1,10 +1,13 @@
-use crate::models::{CallUsage, ClaudeDecision, ExecutionResult, PastDecision, SignalSnapshot};
+use crate::models::{
+    CallUsage, ClaudeDecision, ExecutionResult, FixAction, PastDecision, PendingApproval,
+    SignalSnapshot, SystemState,
+};
 use anyhow::Result;
 use chrono::Utc;
-use eir_proto::UsageSummary;
+use eir_proto::{ApprovalInfo, UsageSummary};
 use sqlx::{sqlite::SqliteConnectOptions, Row, SqlitePool};
 use std::str::FromStr;
-use tracing::info;
+use tracing::{info, warn};
 
 pub async fn init_db(path: &str) -> Result<SqlitePool> {
     let opts =
@@ -166,6 +169,92 @@ pub async fn usage_summary(pool: &SqlitePool) -> Result<UsageSummary> {
         cost_today_usd,
         cost_week_usd,
     })
+}
+
+// ── Pending approvals ─────────────────────────────────────────────────────────
+
+/// Persist a fix awaiting the user's decision and return its id (the row id,
+/// which is also the approval id the UI uses). Survives a service restart so the
+/// user can still act on it afterwards.
+pub async fn insert_pending_approval(
+    pool: &SqlitePool,
+    decision_id: i64,
+    action: &FixAction,
+    info: &ApprovalInfo,
+    baseline: &SystemState,
+) -> Result<i64> {
+    let created_at = Utc::now().to_rfc3339();
+    let action_json = serde_json::to_string(action)?;
+    let info_json = serde_json::to_string(info)?;
+    let baseline_json = serde_json::to_string(baseline)?;
+    let id = sqlx::query(
+        "INSERT INTO pending_approvals
+         (created_at, decision_id, action_json, info_json, baseline_json)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&created_at)
+    .bind(decision_id)
+    .bind(&action_json)
+    .bind(&info_json)
+    .bind(&baseline_json)
+    .execute(pool)
+    .await?
+    .last_insert_rowid();
+    Ok(id)
+}
+
+/// Load all outstanding approvals (oldest first), reconstructing the action and
+/// feedback baseline. Rows whose stored JSON no longer deserializes — e.g. an
+/// action shape removed in an upgrade — are dropped (and deleted) rather than
+/// failing the whole load.
+pub async fn load_pending_approvals(pool: &SqlitePool) -> Result<Vec<PendingApproval>> {
+    let rows = sqlx::query(
+        "SELECT id, decision_id, action_json, info_json, baseline_json
+         FROM pending_approvals ORDER BY id ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let id: i64 = row.try_get("id")?;
+        let decision_id: i64 = row.try_get("decision_id")?;
+        let action_json: String = row.try_get("action_json")?;
+        let info_json: String = row.try_get("info_json")?;
+        let baseline_json: String = row.try_get("baseline_json")?;
+
+        let parsed = (|| -> Result<PendingApproval> {
+            let action: FixAction = serde_json::from_str(&action_json)?;
+            let mut info: ApprovalInfo = serde_json::from_str(&info_json)?;
+            // The row id is the source of truth for the approval id.
+            info.id = id as u64;
+            let baseline: SystemState = serde_json::from_str(&baseline_json)?;
+            Ok(PendingApproval {
+                info,
+                action,
+                decision_id,
+                baseline,
+            })
+        })();
+
+        match parsed {
+            Ok(pa) => out.push(pa),
+            Err(e) => {
+                warn!(id, "Dropping unreadable pending approval: {e}");
+                let _ = delete_pending_approval(pool, id as u64).await;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Remove a resolved approval (approved or rejected) from the queue.
+pub async fn delete_pending_approval(pool: &SqlitePool, id: u64) -> Result<()> {
+    sqlx::query("DELETE FROM pending_approvals WHERE id = ?")
+        .bind(id as i64)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn log_execution(
