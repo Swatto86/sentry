@@ -329,9 +329,14 @@ function showSummary(outcomes) {
   const sum = document.getElementById('upd-summary');
   sum.style.display = 'block';
   sum.style.whiteSpace = 'pre-wrap';
-  if (!outcomes || !outcomes.length) { sum.textContent = 'Nothing to update.'; return; }
+  outcomes = outcomes || [];
+  // Info/status rows (AI-check failure, truncation notes) carry a sentinel key
+  // and are shown as notes, not counted as apps.
+  const notes = outcomes.filter(o => o.key === '__info__');
+  const apps = outcomes.filter(o => o.key !== '__info__');
+  if (!apps.length && !notes.length) { sum.textContent = 'Nothing to update.'; return; }
   let verified = 0, unverified = 0, failed = 0, manual = 0;
-  for (const o of outcomes) {
+  for (const o of apps) {
     if (o.method === 'manual') manual++;
     else if (!o.success) failed++;
     else if (o.verification === 'verified') verified++;
@@ -342,14 +347,15 @@ function showSummary(outcomes) {
     unverified && `${unverified} installed (unverified)`,
     failed     && `${failed} failed`,
     manual     && `${manual} need manual install`,
-  ].filter(Boolean).join(' · ') || 'done';
-  const lines = outcomes.map(o => {
+  ].filter(Boolean).join(' · ') || (apps.length ? 'done' : '');
+  const noteLines = notes.map(o => `• ${o.detail}`);
+  const appLines = apps.map(o => {
     const tag = o.method === 'manual' ? 'manual'
       : !o.success ? 'failed'
       : o.verification === 'verified' ? 'verified' : 'unverified';
     return `${o.name}: ${tag}${o.detail ? ' — ' + o.detail : ''}`;
   });
-  sum.textContent = `${head}\n${lines.join('\n')}`;
+  sum.textContent = [head, ...noteLines, ...appLines].filter(Boolean).join('\n');
 }
 
 async function loadUpdates() {

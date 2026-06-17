@@ -5,7 +5,7 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1429,6 +1429,15 @@ fn manual_outcome(name: &str, current: &str, cost: f64, detail: String, releases
     o
 }
 
+/// A non-app status row for the "Update everything" summary (e.g. the AI check
+/// failed, or only the first N apps were attempted). Carries no real row key.
+fn info_outcome(detail: String, success: bool) -> AppOutcome {
+    let mut o = AppOutcome::new("__info__", "Other-app check", "manual", "");
+    o.success = success;
+    o.detail = detail;
+    o
+}
+
 /// Update one non-winget app via the AI: plan -> validate -> download -> install
 /// -> verify. Falls back to a manual outcome when no safe direct install exists.
 #[tauri::command]
@@ -1480,14 +1489,34 @@ pub async fn update_everything(app: AppHandle) -> Result<Vec<AppOutcome>, String
         outcomes.extend(verify_winget_batch(&app, &winget, &bulk).await);
     }
 
-    // Phase 2 — AI installs. Download + check each unelevated first.
-    let ai = check_ai_updates().await.unwrap_or(AiCheckResult {
-        updates: vec![],
-        checked: 0,
-        cost_usd: 0.0,
-        note: None,
-    });
-    let pending: Vec<AiUpdate> = ai.updates.into_iter().take(AI_INSTALL_CAP).collect();
+    // Phase 2 — AI installs. Surface check failures/truncation as visible rows
+    // instead of collapsing them into a silent "nothing to update".
+    let pending: Vec<AiUpdate> = match check_ai_updates().await {
+        Ok(ai) => {
+            if let Some(note) = ai.note.filter(|n| !n.is_empty()) {
+                outcomes.push(info_outcome(note, true));
+            }
+            let ups = ai.updates;
+            if ups.len() > AI_INSTALL_CAP {
+                outcomes.push(info_outcome(
+                    format!(
+                        "{} other apps need updating; installing the first {}.",
+                        ups.len(),
+                        AI_INSTALL_CAP
+                    ),
+                    true,
+                ));
+            }
+            ups.into_iter().take(AI_INSTALL_CAP).collect()
+        }
+        Err(e) => {
+            outcomes.push(info_outcome(
+                format!("couldn't check non-winget apps: {e}"),
+                false,
+            ));
+            vec![]
+        }
+    };
     let total = pending.len();
 
     let mut jobs: Vec<InstallJob> = Vec::new();
@@ -1636,33 +1665,56 @@ fn is_noise(name: &str) -> bool {
     SKIP.iter().any(|s| n.contains(s))
 }
 
-/// Parse `winget list` for apps winget can't manage — rows whose Source is not
-/// "winget"/"msstore". Tolerates winget's '…' column truncation, and skips
-/// MSIX/Store-delivered packages (those update through the Store, not a download).
-/// Returns (name, version).
-fn parse_unmanaged(text: &str) -> Vec<(String, String)> {
+/// A winget *catalog* id looks like `Publisher.App` — a dot, no path separators
+/// or spaces. winget can genuinely manage (and `winget upgrade` will flag) apps
+/// with such ids, so they belong to Phase 1, not the AI check. A Microsoft Store
+/// product id (e.g. `XPDC2RH70K22MN`) or an ARP id (`ARP\\Machine\\…`) is NOT a
+/// catalog id — those are the correlated-standalone / unmanaged apps winget
+/// upgrade silently ignores, which is exactly the gap the AI check must cover.
+fn is_winget_catalog_id(id: &str) -> bool {
+    let id = id.trim_end_matches('…');
+    id.contains('.') && !id.contains('\\') && !id.contains('/') && !id.contains(' ')
+}
+
+/// Parse `winget list` for apps the AI should check for updates — the ones winget
+/// upgrade cannot or will not handle.
+///
+/// The old code skipped any row whose Source was winget/msstore, assuming winget
+/// would upgrade them. That silently hid standalone apps winget merely CORRELATED
+/// to a catalog entry (e.g. Discord's per-user Squirrel install shows Store id
+/// XPDC2RH70K22MN with Source=winget) but cannot actually upgrade. Instead we skip
+/// only what winget genuinely owns or what updates elsewhere:
+///   - `MSIX\` packages and msstore-source rows (true Store apps — update via the Store);
+///   - winget-source rows with a real `Publisher.App` catalog id (winget upgrade owns these);
+///   - noise (drivers/runtimes/etc.);
+///   - anything Phase 1 already flagged (`already_managed`, case-insensitive by name).
+///
+/// Everything else — store-correlated standalone apps (Discord) and ARP/unmanaged
+/// apps — is kept. Returns (name, version).
+fn parse_unmanaged(text: &str, already_managed: &HashSet<String>) -> Vec<(String, String)> {
     let (offsets, rows) = winget_table(text);
     let mut apps = Vec::new();
     for row in &rows {
-        // Source column: winget/msstore rows are handled by the winget panel.
-        // winget can truncate even the source (e.g. "mssto…"), so compare the
-        // ellipsis-stripped token as a prefix of a real source name. The length
-        // guard keeps a blank or short version string from matching.
-        let source = column(&offsets, row, "Source")
-            .trim_end_matches('…')
-            .to_lowercase();
-        if source.len() >= 5 && ["winget", "msstore"].iter().any(|s| s.starts_with(&source)) {
-            continue;
-        }
-        // MSIX/Store-delivered packages (Windows components, Store apps) update
-        // through the Store, not by downloading an installer — skip them so the
-        // AI check stays focused on real third-party desktop apps.
-        if column(&offsets, row, "Id").starts_with("MSIX\\") {
+        let id = column(&offsets, row, "Id");
+        if id.starts_with("MSIX\\") {
             continue;
         }
         let name = column(&offsets, row, "Name");
         let version = column(&offsets, row, "Version");
         if name.is_empty() || version.is_empty() || is_noise(&name) {
+            continue;
+        }
+        // Source, ellipsis-stripped (winget truncates long cells with '…').
+        let source = column(&offsets, row, "Source")
+            .trim_end_matches('…')
+            .to_lowercase();
+        let is_msstore = source.len() >= 5 && "msstore".starts_with(source.as_str());
+        let is_winget = source.len() >= 5 && "winget".starts_with(source.as_str());
+        // True Store app, or an app winget genuinely manages -> not for the AI check.
+        if is_msstore || (is_winget && is_winget_catalog_id(&id)) {
+            continue;
+        }
+        if already_managed.contains(&name.to_lowercase()) {
             continue;
         }
         apps.push((name, version));
@@ -1737,8 +1789,16 @@ pub async fn check_ai_updates() -> Result<AiCheckResult, String> {
     .map_err(|e| e.to_string())?
     .map_err(|e| format!("winget is not available: {e}"))?;
 
+    // Apps winget upgrade will already handle (Phase 1) — dedup them out by name.
+    let managed: HashSet<String> = list_app_updates()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| u.name.to_lowercase())
+        .collect();
+
     let notes = load_notes();
-    let mut apps = parse_unmanaged(&String::from_utf8_lossy(&list_out.stdout));
+    let mut apps = parse_unmanaged(&String::from_utf8_lossy(&list_out.stdout), &managed);
     // Drop apps the user has chosen to ignore.
     apps.retain(|(n, _)| {
         !notes
@@ -2219,24 +2279,17 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_classifies_winget_list_rows() {
-        // Id width forces '…' truncation on long ARP/MSIX ids; Source width forces
-        // 'msstore' to truncate to 'mssto…' — both are real winget behaviours.
-        let widths = [22, 30, 18, 6];
+    fn unmanaged_keeps_correlated_standalone_and_dedupes_managed_and_store() {
+        let widths = [24, 32, 18, 7];
         let header = ["Name", "Id", "Version", "Source"];
         let table = render(
             &widths,
             &header,
             &[
-                &["7-Zip", "7zip.7zip", "25.01", "winget"], // winget-managed → skip
-                &["iCloud", "9PKTQ5699M62", "15.8.127.0", "msstore"], // store (mssto…) → skip
+                &["7-Zip", "7zip.7zip", "25.01", "winget"], // already in winget upgrade → skip
+                &["Discord", "XPDC2RH70K22MN", "1.0.9242", "winget"], // correlated standalone → KEEP
+                &["iCloud", "9PKTQ5699M62", "15.8.127.0", "msstore"], // real Store/Appx → skip via token
                 &["Git", "ARP\\Machine\\X64\\Git_is1", "2.52.0", ""], // unmanaged → keep
-                &[
-                    "PSForge",
-                    "ARP\\Machine\\X64\\{2B48800A-5551-4F2F-97F0-2B5B1234ABCD}",
-                    "1.2.18",
-                    "",
-                ], // truncated id, unmanaged → keep (was dropped before)
                 &["Battle.net", "ARP\\Machine\\X86\\Battle.net", "Unknown", ""], // ".net" must not filter it
                 &[
                     "NVIDIA Graphics Driver",
@@ -2258,21 +2311,58 @@ mod tests {
                 ], // runtime → noise
             ],
         );
-        let apps = parse_unmanaged(&table);
+        // Nothing pre-flagged by Phase 1; 7-Zip is excluded purely by its catalog id.
+        let managed = std::collections::HashSet::new();
+        let apps = parse_unmanaged(&table, &managed);
         let names: Vec<&str> = apps.iter().map(|(n, _)| n.as_str()).collect();
-        // Kept: real third-party apps, including one whose long id was truncated.
+        // The regression guard: a winget-CORRELATED standalone app (Discord shows a
+        // Store id + winget source, NOT a Publisher.App catalog id) is detected now.
+        assert!(names.contains(&"Discord"), "Discord must be detected now");
+        assert_eq!(
+            apps.iter().find(|(n, _)| n == "Discord").unwrap().1,
+            "1.0.9242"
+        );
         assert!(names.contains(&"Git"));
-        assert!(names.contains(&"PSForge"));
         assert!(names.contains(&"Battle.net"));
-        let psforge = apps.iter().find(|(n, _)| n == "PSForge").unwrap();
-        assert_eq!(psforge.1, "1.2.18");
-        // Excluded: winget source, truncated msstore source, driver/runtime noise,
-        // and MSIX/Store-delivered packages.
+        // 7-Zip excluded via its winget catalog id (winget manages it); iCloud via
+        // msstore source; driver/runtime via noise; AV1 via the MSIX id.
         assert!(!names.contains(&"7-Zip"));
         assert!(!names.contains(&"iCloud"));
         assert!(!names.contains(&"NVIDIA Graphics Driver"));
         assert!(!names.contains(&"AV1 Video Extension"));
         assert!(!names.contains(&"Microsoft .NET Runtime"));
+    }
+
+    #[test]
+    fn catalog_id_distinguishes_managed_from_correlated() {
+        assert!(is_winget_catalog_id("Anthropic.Claude"));
+        assert!(is_winget_catalog_id("7zip.7zip"));
+        assert!(is_winget_catalog_id("JanDeDobbeleer.OhMyPosh"));
+        assert!(is_winget_catalog_id("Microsoft.VisualStudio.2022.Buil…")); // truncated, still catalog
+        assert!(!is_winget_catalog_id("XPDC2RH70K22MN")); // Store id (Discord)
+        assert!(!is_winget_catalog_id("9PKTQ5699M62")); // Store id
+        assert!(!is_winget_catalog_id("ARP\\Machine\\X64\\Git_is1")); // ARP id
+    }
+
+    #[test]
+    fn unmanaged_dedupes_phase1_apps_case_insensitively() {
+        let widths = [22, 26, 12, 7];
+        let header = ["Name", "Id", "Version", "Source"];
+        let table = render(
+            &widths,
+            &header,
+            &[
+                &["Obsidian", "ARP\\X64\\Obsidian", "1.5.0", "winget"],
+                &["Krita", "ARP\\X64\\Krita", "5.2.0", ""],
+            ],
+        );
+        // managed uses a different letter case than the display name.
+        let managed: std::collections::HashSet<String> =
+            ["obsidian".to_string()].into_iter().collect();
+        let apps = parse_unmanaged(&table, &managed);
+        let names: Vec<&str> = apps.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"Obsidian"));
+        assert!(names.contains(&"Krita"));
     }
 
     #[test]
