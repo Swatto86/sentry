@@ -239,10 +239,13 @@ fn elevated_winget_blocking(args: Vec<String>) -> Result<(i32, String), String> 
         .join(",");
     let log_lit = log.to_string_lossy().replace('\'', "''");
     // Elevated body: merge every winget stream and write it UTF-8 to the log,
-    // then propagate winget's own exit code. -Encoding utf8 avoids PS5's UTF-16
-    // default so the Rust side reads it cleanly.
+    // then propagate winget's own exit code. Force the console to decode winget's
+    // bytes as UTF-8 first — otherwise its progress-bar block glyphs come back as
+    // OEM-code-page mojibake (▒ → "ÔûÆ"). -Encoding utf8 on Out-File then avoids
+    // PS5's UTF-16 default so the Rust side reads it cleanly.
     let inner = format!(
-        "$a=@({arg_list})\r\n\
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\r\n\
+         $a=@({arg_list})\r\n\
          & winget @a *>&1 | Out-File -FilePath '{log_lit}' -Encoding utf8\r\n\
          exit $LASTEXITCODE\r\n"
     );
@@ -301,24 +304,121 @@ fn portable_modified(output: &str) -> bool {
     l.contains("has been modified") && l.contains("--force")
 }
 
+/// Every char in `tok` is part of winget's download bar: an ASCII spinner frame
+/// (`-\|/`) or a block/shade glyph. The trailing set is the CP850/437 mojibake the
+/// E2 96 xx block glyphs decode to on a console that ignores the UTF-8 override —
+/// kept as a belt-and-braces fallback for the encoding fix at the capture source.
+fn is_bar_token(tok: &str) -> bool {
+    !tok.is_empty()
+        && tok.chars().all(|c| {
+            matches!(
+                c,
+                '-' | '\\'
+                    | '|'
+                    | '/'
+                    | '░'
+                    | '▒'
+                    | '▓'
+                    | '█'
+                    | '▏'
+                    | '▎'
+                    | '▍'
+                    | '▌'
+                    | '▋'
+                    | '▊'
+                    | '▉'
+                    | '■'
+                    | '□'
+                    | '▬'
+                    | 'Ô'
+                    | 'û'
+                    | 'Æ'
+                    | 'ê'
+                    | 'æ'
+                    | 'ô'
+            )
+        })
+}
+
+/// A token from winget's "<n> KB / <n> MB" download counter: a number or a unit.
+fn is_byte_count_token(tok: &str) -> bool {
+    matches!(
+        tok.to_ascii_uppercase().as_str(),
+        "KB" | "MB" | "GB" | "TB" | "B" | "%"
+    ) || tok
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+}
+
+/// A whole line that is nothing but winget's live progress UI — spinner frames,
+/// the download bar, and its byte counter — and so carries no message to show.
+fn is_progress_noise(line: &str) -> bool {
+    let mut saw_token = false;
+    for tok in line.split_whitespace() {
+        saw_token = true;
+        if !(is_bar_token(tok) || is_byte_count_token(tok)) {
+            return false;
+        }
+    }
+    saw_token
+}
+
+/// winget's verbose step-by-step chatter and licence boilerplate — narration the
+/// row's badge and version already convey. Dropped from the summary; genuine
+/// status ("Successfully installed") and error lines are never matched here.
+fn is_winget_chatter(line: &str) -> bool {
+    let low = line.to_lowercase();
+    line.starts_with("Found ")
+        || low.starts_with("downloading ")
+        || low.starts_with("starting package install")
+        || low.contains("licensed to you by its owner")
+        || low.contains("microsoft is not responsible")
+}
+
+/// Distil winget's raw capture into a concise, readable message. winget repaints
+/// its spinner and download bar in place with carriage returns, so the capture is
+/// a run-on of UI frames; split those back out, drop the progress noise, licence
+/// boilerplate, and step chatter, then join what's left. Real status and error
+/// lines always survive, so a failure still carries winget's own reason.
+fn clean_winget_output(raw: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for seg in raw.split(['\r', '\n']) {
+        let seg = seg.trim();
+        if seg.is_empty() || is_progress_noise(seg) || is_winget_chatter(seg) {
+            continue;
+        }
+        // Collapse the padding winget uses to align its table cells and labels.
+        let collapsed = seg.split_whitespace().collect::<Vec<_>>().join(" ");
+        if lines.last().map(String::as_str) != Some(collapsed.as_str()) {
+            lines.push(collapsed);
+        }
+    }
+    let joined = lines.join(" · ");
+    if joined.chars().count() > 300 {
+        joined.chars().take(299).chain(['…']).collect()
+    } else {
+        joined
+    }
+}
+
 /// Turn an (exit code, output) pair into a user-facing result, keeping winget's
 /// own message on failure so the UI/logs can show *why* it failed.
 fn winget_outcome(code: i32, output: &str) -> Result<String, String> {
+    let clean = clean_winget_output(output);
     if code == 0 {
-        return Ok(if output.is_empty() {
+        return Ok(if clean.is_empty() {
             "ok".to_string()
         } else {
-            output.to_string()
+            clean
         });
     }
     if code == 1223 {
         return Err("update cancelled at the UAC prompt".to_string());
     }
-    let detail: String = output.chars().take(600).collect();
-    if detail.is_empty() {
+    if clean.is_empty() {
         Err(format!("winget exited with code {code}"))
     } else {
-        Err(format!("winget failed (code {code}): {detail}"))
+        Err(format!("winget failed (code {code}): {clean}"))
     }
 }
 
@@ -2754,6 +2854,54 @@ mod tests {
         // Other failures keep winget's own message so the UI can show why.
         let err = winget_outcome(-1, "0x8a150057 : the package is pinned").unwrap_err();
         assert!(err.contains("the package is pinned"));
+    }
+
+    #[test]
+    fn clean_winget_output_strips_progress_noise() {
+        // A real successful-install capture: the "Found"/licence/"Downloading"
+        // chatter, the carriage-return spinner frames, and the block-glyph
+        // download bar with its byte counter — all noise around two status lines.
+        let raw = "Found GitHub CLI [GitHub.cli] Version 2.95.0\n\
+                   This application is licensed to you by its owner.\n\
+                   Microsoft is not responsible for, nor does it grant any licenses to, third-party packages.\n\
+                   Downloading https://github.com/cli/cli/releases/download/v2.95.0/gh_2.95.0_windows_amd64.msi\n\
+                   \r  - \r  \\ \r  | \r  / \
+                   \r  ██████████  1024 KB / 14.3 MB\
+                   \r  ████████████████████████████  14.3 MB / 14.3 MB\n\
+                   Successfully verified installer hash\n\
+                   Starting package install...\n\
+                   \r  - \r  \\ \r\
+                   Successfully installed";
+        assert_eq!(
+            clean_winget_output(raw),
+            "Successfully verified installer hash · Successfully installed"
+        );
+    }
+
+    #[test]
+    fn clean_winget_output_strips_oem_mojibake_bar() {
+        // Same download bar as it arrives on a console that ignores the UTF-8
+        // override: ▒ decodes to "ÔûÆ". It must still be recognised as noise.
+        let raw = "Downloading https://example.com/app.msi\r\
+                   ÔûÆÔûÆÔûÆÔûÆ  512 KB / 9.0 MB\r\
+                   ÔûÆÔûÆÔûÆÔûÆÔûÆÔûÆ  9.0 MB / 9.0 MB\n\
+                   Successfully installed";
+        assert_eq!(clean_winget_output(raw), "Successfully installed");
+    }
+
+    #[test]
+    fn clean_winget_output_preserves_failure_reason() {
+        // A failure capture is mostly an error line — it must survive cleaning so
+        // winget_outcome can show why the install failed.
+        let raw = "Found 7-Zip [7zip.7zip] Version 25.01\r\
+                   - \r  / \r\
+                   Installer failed with exit code: 1603";
+        assert_eq!(
+            clean_winget_output(raw),
+            "Installer failed with exit code: 1603"
+        );
+        let err = winget_outcome(1, raw).unwrap_err();
+        assert!(err.contains("exit code: 1603"), "got: {err}");
     }
 
     #[test]
