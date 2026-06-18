@@ -371,6 +371,9 @@ fn is_winget_chatter(line: &str) -> bool {
     line.starts_with("Found ")
         || low.starts_with("downloading ")
         || low.starts_with("starting package install")
+        // Hash verification is winget-internal plumbing; the row's badge already
+        // conveys whether the installed version verified.
+        || low.starts_with("successfully verified")
         || low.contains("licensed to you by its owner")
         || low.contains("microsoft is not responsible")
 }
@@ -2872,10 +2875,7 @@ mod tests {
                    Starting package install...\n\
                    \r  - \r  \\ \r\
                    Successfully installed";
-        assert_eq!(
-            clean_winget_output(raw),
-            "Successfully verified installer hash · Successfully installed"
-        );
+        assert_eq!(clean_winget_output(raw), "Successfully installed");
     }
 
     #[test]
