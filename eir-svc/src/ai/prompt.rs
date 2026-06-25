@@ -141,9 +141,16 @@ For EACH problem:
 6. Side effects: what might break
 7. Undo instructions: how to revert
 
+If the signals suggest something is wrong but you cannot confidently diagnose or fix it at
+this reasoning level — ambiguous or unfamiliar evidence, conflicting signals — set
+"needs_deeper_analysis": true and keep the problems list conservative; a deeper pass (higher
+reasoning effort / a stronger model) will then re-analyze. Set it false when the system is
+healthy or you are already confident.
+
 Respond ONLY with valid JSON (no markdown, no preamble):
 {{
   "analysis": "Overall system health summary",
+  "needs_deeper_analysis": false,
   "problems": [
     {{
       "diagnosis": "...",

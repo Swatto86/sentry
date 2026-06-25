@@ -220,28 +220,44 @@ impl AiClient {
         history: &[PastDecision],
         feedback_summary: Option<&str>,
     ) -> Result<(ClaudeDecision, Option<CallUsage>)> {
+        self.analyze_with(snapshot, history, feedback_summary, None, None)
+            .await
+    }
+
+    /// As [`analyze`], but with an optional per-call model and/or reasoning-effort
+    /// override — the advisor-mode escalation lever. The model override applies to
+    /// every provider; the effort override applies to the Claude CLI only (other
+    /// providers have no effort dial, so it is ignored there). A `None` (or empty)
+    /// override keeps the configured value.
+    pub async fn analyze_with(
+        &self,
+        snapshot: &SignalSnapshot,
+        history: &[PastDecision],
+        feedback_summary: Option<&str>,
+        model_override: Option<&str>,
+        effort_override: Option<&str>,
+    ) -> Result<(ClaudeDecision, Option<CallUsage>)> {
+        let model_ov = model_override.map(str::trim).filter(|s| !s.is_empty());
+        let effort_ov = effort_override.map(str::trim).filter(|s| !s.is_empty());
         let prompt = crate::ai::prompt::build(snapshot, history, feedback_summary);
         let (raw, usage) = match &self.config {
             AiClientConfig::Anthropic { api_key, model } => {
-                (self.call_anthropic(api_key, model, &prompt).await?, None)
+                let m = model_ov.unwrap_or(model);
+                (self.call_anthropic(api_key, m, &prompt).await?, None)
             }
             AiClientConfig::OpenAiCompatible {
                 base_url,
                 api_key,
                 model,
             } => {
-                self.call_openai_style(base_url, api_key, model, &prompt, false)
+                let m = model_ov.unwrap_or(model);
+                self.call_openai_style(base_url, api_key, m, &prompt, false)
                     .await?
             }
             AiClientConfig::OpenRouter { api_key, model } => {
-                self.call_openai_style(
-                    "https://openrouter.ai/api/v1",
-                    api_key,
-                    model,
-                    &prompt,
-                    true,
-                )
-                .await?
+                let m = model_ov.unwrap_or(model);
+                self.call_openai_style("https://openrouter.ai/api/v1", api_key, m, &prompt, true)
+                    .await?
             }
             AiClientConfig::ClaudeCli {
                 binary,
@@ -249,7 +265,9 @@ impl AiClient {
                 user_profile,
                 effort,
             } => {
-                self.call_claude_cli(binary, model, effort, user_profile.as_deref(), &prompt)
+                let m = model_ov.unwrap_or(model);
+                let e = effort_ov.unwrap_or(effort);
+                self.call_claude_cli(binary, m, e, user_profile.as_deref(), &prompt)
                     .await?
             }
         };

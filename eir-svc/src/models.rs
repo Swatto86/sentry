@@ -188,6 +188,12 @@ pub struct PendingApproval {
 pub struct ClaudeDecision {
     pub analysis: String,
     pub problems: Vec<Problem>,
+    /// The model sets this when the signals look concerning but it can't confidently
+    /// diagnose/fix them at the current reasoning level — the advisor-mode trigger to
+    /// re-analyze at higher effort / a stronger model. `#[serde(default)]` so an older
+    /// or terse response (without the field) still parses.
+    #[serde(default)]
+    pub needs_deeper_analysis: bool,
 }
 
 /// Token + cost usage for a single Claude call (claude_cli provider).

@@ -12,8 +12,8 @@ mod signals;
 mod updater;
 
 use eir_proto::{
-    ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg, UiSettings,
-    UpdaterStatus, UsageSummary,
+    AdvisorStatus, ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg,
+    UiSettings, UpdaterStatus, UsageSummary,
 };
 use models::{FixAction, PendingApproval, SignalSnapshot, SystemState};
 use sqlx::SqlitePool;
@@ -181,6 +181,12 @@ struct SvcState {
     updater: UpdaterStatus,
     /// True while an update cycle is in flight (prevents overlapping cycles).
     updater_running: bool,
+    /// Advisor-mode status broadcast to the UI.
+    advisor: Option<AdvisorStatus>,
+    /// Escalation AI spend accumulated today (reset at the UTC day boundary).
+    advisor_spent_today: f64,
+    /// The UTC date (YYYY-MM-DD) that `advisor_spent_today` belongs to.
+    advisor_spend_date: String,
 }
 
 impl Default for SvcState {
@@ -201,6 +207,9 @@ impl Default for SvcState {
             settings: None,
             updater: UpdaterStatus::default(),
             updater_running: false,
+            advisor: None,
+            advisor_spent_today: 0.0,
+            advisor_spend_date: String::new(),
         }
     }
 }
@@ -236,7 +245,41 @@ fn build_status(st: &SvcState) -> StatusPayload {
         usage: st.usage.clone(),
         settings: st.settings.clone(),
         updater: Some(st.updater.clone()),
+        advisor: st.advisor.clone(),
     }
+}
+
+/// Decide whether the advisor should re-analyse at a higher tier, and why. Pure.
+/// Returns `Some(reason)` to escalate. Bounded: it fires only when advisor mode is on,
+/// a deeper tier is configured, the day's escalation budget isn't spent, AND the agent
+/// flagged ambiguity or the best reported confidence is below the threshold.
+fn should_escalate(
+    decision: &models::ClaudeDecision,
+    cfg: &config::AdvisorConfig,
+    spent_today: f64,
+) -> Option<&'static str> {
+    if !cfg.enabled {
+        return None;
+    }
+    // A deeper pass needs at least one lever (a stronger model or a higher effort).
+    if cfg.escalation_model.trim().is_empty() && cfg.escalation_effort.trim().is_empty() {
+        return None;
+    }
+    if cfg.budget_usd_per_day > 0.0 && spent_today >= cfg.budget_usd_per_day {
+        return None;
+    }
+    if decision.needs_deeper_analysis {
+        return Some("the agent flagged the signals as ambiguous");
+    }
+    let max_conf = decision
+        .problems
+        .iter()
+        .map(|p| p.confidence)
+        .fold(0.0_f32, f32::max);
+    if !decision.problems.is_empty() && max_conf < cfg.low_confidence_threshold {
+        return Some("confidence was low");
+    }
+    None
 }
 
 /// Spawn one update cycle on a detached task so the multi-minute run never blocks the
@@ -472,6 +515,12 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     if let Ok(recent) = updater::history::recent(&db, 50).await {
         st.updater.recent = recent;
     }
+    st.advisor = Some(AdvisorStatus {
+        enabled: cfg.advisor.enabled,
+        settings: cfg.advisor.to_view(),
+        ..Default::default()
+    });
+    st.advisor_spend_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     // A bad AI config must NOT kill the service — degrade instead, so the pipe
     // and UI stay alive and the user can fix it in Settings.
     let ai = match ai::client::AiClient::new(&cfg.api) {
@@ -726,6 +775,28 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             }
                             pipe.broadcast_status(build_status(&st));
                         }
+                        UiMsg::SetAdvisorSettings(update) => {
+                            // Applied live — no service restart.
+                            cfg.advisor.apply_view(*update);
+                            let view = cfg.advisor.to_view();
+                            match st.advisor.as_mut() {
+                                Some(a) => {
+                                    a.enabled = cfg.advisor.enabled;
+                                    a.settings = view;
+                                }
+                                None => {
+                                    st.advisor = Some(AdvisorStatus {
+                                        enabled: cfg.advisor.enabled,
+                                        settings: view,
+                                        ..Default::default()
+                                    });
+                                }
+                            }
+                            if let Err(e) = config::save(&cfg, "config.toml") {
+                                warn!("Failed to save advisor settings: {e}");
+                            }
+                            pipe.broadcast_status(build_status(&st));
+                        }
                         }
                         continue;
                     }
@@ -843,7 +914,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                 }
 
                 // ── Claude analysis ──────────────────────────────────────────
-                let claude_decision =
+                let mut claude_decision =
                     match ai.analyze(&snapshot, &history, Some(&feedback_summary)).await {
                         Ok((d, usage)) => {
                             if let Some(u) = usage {
@@ -873,6 +944,58 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
 
                 st.last_analysis = claude_decision.analysis.clone();
                 st.error         = None;
+
+                // ── Advisor mode: re-think harder once if warranted ───────────
+                {
+                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                    if st.advisor_spend_date != today {
+                        st.advisor_spend_date = today;
+                        st.advisor_spent_today = 0.0;
+                    }
+                    let mut adv = AdvisorStatus {
+                        enabled: cfg.advisor.enabled,
+                        escalated: false,
+                        escalation_model: String::new(),
+                        reason: String::new(),
+                        spent_today_usd: st.advisor_spent_today,
+                        settings: cfg.advisor.to_view(),
+                    };
+                    if let Some(reason) =
+                        should_escalate(&claude_decision, &cfg.advisor, st.advisor_spent_today)
+                    {
+                        info!(reason, "Advisor escalating to a deeper analysis pass");
+                        match ai
+                            .analyze_with(
+                                &snapshot,
+                                &history,
+                                Some(&feedback_summary),
+                                Some(cfg.advisor.escalation_model.as_str()),
+                                Some(cfg.advisor.escalation_effort.as_str()),
+                            )
+                            .await
+                        {
+                            Ok((d2, usage2)) => {
+                                if let Some(u) = usage2 {
+                                    st.advisor_spent_today += u.cost_usd;
+                                    if let Err(e) = audit::log_usage(&db, &u).await {
+                                        warn!("Failed to log escalation usage: {e}");
+                                    }
+                                    if let Ok(s) = audit::usage_summary(&db).await {
+                                        st.usage = Some(s);
+                                    }
+                                }
+                                claude_decision = d2;
+                                st.last_analysis = claude_decision.analysis.clone();
+                                adv.escalated = true;
+                                adv.reason = reason.to_string();
+                                adv.escalation_model = cfg.advisor.escalation_model.clone();
+                                adv.spent_today_usd = st.advisor_spent_today;
+                            }
+                            Err(e) => warn!("Advisor escalation failed: {e}"),
+                        }
+                    }
+                    st.advisor = Some(adv);
+                }
 
                 let decision_id = match audit::log_decision(
                     &db,
@@ -1067,5 +1190,66 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
         _ = shutdown => {
             info!("Shutdown signal received — stopping service loop");
         }
+    }
+}
+
+#[cfg(test)]
+mod advisor_tests {
+    use super::*;
+    use config::AdvisorConfig;
+    use models::{ClaudeDecision, Problem};
+
+    fn cfg(enabled: bool) -> AdvisorConfig {
+        AdvisorConfig {
+            enabled,
+            escalation_model: "opus".into(),
+            escalation_effort: String::new(),
+            low_confidence_threshold: 0.6,
+            budget_usd_per_day: 0.50,
+        }
+    }
+
+    fn decision(needs_deeper: bool, confidences: &[f32]) -> ClaudeDecision {
+        ClaudeDecision {
+            analysis: String::new(),
+            needs_deeper_analysis: needs_deeper,
+            problems: confidences
+                .iter()
+                .map(|&c| Problem {
+                    diagnosis: String::new(),
+                    root_cause: String::new(),
+                    confidence: c,
+                    proposed_fix: serde_json::Value::Null,
+                    reasoning: String::new(),
+                    side_effects: String::new(),
+                    undo_instructions: String::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn escalates_on_ai_flag_and_low_confidence_only_when_enabled() {
+        // Disabled -> never.
+        assert!(should_escalate(&decision(true, &[]), &cfg(false), 0.0).is_none());
+        // AI flag -> escalate.
+        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.0).is_some());
+        // Low-confidence reported problem -> escalate.
+        assert!(should_escalate(&decision(false, &[0.4]), &cfg(true), 0.0).is_some());
+        // Confident, no flag -> don't.
+        assert!(should_escalate(&decision(false, &[0.95]), &cfg(true), 0.0).is_none());
+        // Healthy (no problems, no flag) -> don't.
+        assert!(should_escalate(&decision(false, &[]), &cfg(true), 0.0).is_none());
+    }
+
+    #[test]
+    fn budget_and_missing_tier_block_escalation() {
+        // Over the daily budget -> don't, even with the AI flag.
+        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.50).is_none());
+        // No escalation tier configured -> don't.
+        let mut no_tier = cfg(true);
+        no_tier.escalation_model = String::new();
+        no_tier.escalation_effort = String::new();
+        assert!(should_escalate(&decision(true, &[]), &no_tier, 0.0).is_none());
     }
 }

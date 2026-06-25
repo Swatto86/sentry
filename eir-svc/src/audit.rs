@@ -95,6 +95,7 @@ pub async fn get_recent_decisions(pool: &SqlitePool, limit: i64) -> Result<Vec<P
             serde_json::from_str(&response_str).unwrap_or_else(|_| ClaudeDecision {
                 analysis: String::new(),
                 problems: vec![],
+                needs_deeper_analysis: false,
             });
 
         if response.problems.is_empty() {

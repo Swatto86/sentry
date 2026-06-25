@@ -114,3 +114,24 @@ ignored = []
 # releases live. Keyed by the same stable app name.
 # [updater.notes]
 # "my custom tool" = "self-built — never report an update"
+
+# ── Advisor mode (AI self-tunes its reasoning) ────────────────────────────────
+# When the AI flags a hard/ambiguous situation (or its confidence is low), Eir can
+# re-analyse ONCE at a higher reasoning effort and/or a stronger model — cheap/fast
+# for routine cycles, deeper only when it matters — bounded by a daily spend cap.
+# The escalation tier is fixed config (never AI-chosen); the AI only gets to say
+# "I'm not sure, look harder". Off by default. Editable in the app's Settings.
+[advisor]
+enabled = false
+
+# The stronger model to switch to for the deeper pass (empty = keep the base model).
+# e.g. Claude CLI: "opus"; OpenRouter: a paid model id. Effort applies to Claude CLI
+# only (other providers have no effort dial — the model switch still works).
+escalation_model = ""
+escalation_effort = ""              # low|medium|high|xhigh|max (Claude CLI only)
+
+# Escalate when the best reported confidence is below this (0.0–1.0).
+low_confidence_threshold = 0.6
+
+# Cap on escalation AI spend per day (USD); 0 = no explicit cap.
+budget_usd_per_day = 0.50

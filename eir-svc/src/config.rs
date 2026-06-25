@@ -13,6 +13,60 @@ pub struct Config {
     /// written before the updater existed (no `[updater]` section) still loads.
     #[serde(default)]
     pub updater: UpdaterConfig,
+    /// Advisor-mode settings (AI self-tunes reasoning effort/model). `#[serde(default)]`
+    /// so a `config.toml` without an `[advisor]` section still loads.
+    #[serde(default)]
+    pub advisor: AdvisorConfig,
+}
+
+/// When the AI flags a hard/ambiguous situation (or its confidence is low), Eir can
+/// re-analyse once at a higher reasoning effort and/or a stronger model — bounded by
+/// a daily spend cap. Off by default; the escalation tier is fixed config (never
+/// AI-chosen).
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct AdvisorConfig {
+    pub enabled: bool,
+    /// Stronger model to switch to for the deeper pass (empty = keep the base model).
+    pub escalation_model: String,
+    /// Higher reasoning effort for the deeper pass (Claude CLI only; empty = keep base).
+    pub escalation_effort: String,
+    /// Escalate when the best reported confidence is below this (0.0–1.0).
+    pub low_confidence_threshold: f32,
+    /// Cap on escalation AI spend per day (USD); 0 = no explicit cap.
+    pub budget_usd_per_day: f64,
+}
+
+impl Default for AdvisorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            escalation_model: String::new(),
+            escalation_effort: String::new(),
+            low_confidence_threshold: 0.6,
+            budget_usd_per_day: 0.50,
+        }
+    }
+}
+
+impl AdvisorConfig {
+    pub fn to_view(&self) -> eir_proto::AdvisorSettingsView {
+        eir_proto::AdvisorSettingsView {
+            enabled: self.enabled,
+            escalation_model: self.escalation_model.clone(),
+            escalation_effort: self.escalation_effort.clone(),
+            low_confidence_threshold: self.low_confidence_threshold,
+            budget_usd_per_day: self.budget_usd_per_day,
+        }
+    }
+
+    pub fn apply_view(&mut self, u: eir_proto::AdvisorSettingsUpdate) {
+        self.enabled = u.enabled;
+        self.escalation_model = u.escalation_model.trim().to_string();
+        self.escalation_effort = normalize_effort(&u.escalation_effort);
+        self.low_confidence_threshold = u.low_confidence_threshold.clamp(0.0, 0.95);
+        self.budget_usd_per_day = u.budget_usd_per_day.max(0.0);
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, Copy)]

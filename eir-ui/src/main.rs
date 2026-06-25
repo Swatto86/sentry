@@ -3,7 +3,9 @@
 mod pipe_client;
 mod util;
 
-use eir_proto::{SettingsUpdate, StatusPayload, UiMsg, UpdaterSettingsUpdate};
+use eir_proto::{
+    AdvisorSettingsUpdate, SettingsUpdate, StatusPayload, UiMsg, UpdaterSettingsUpdate,
+};
 use pipe_client::SharedStatus;
 use std::sync::{Arc, Mutex};
 use tauri::{
@@ -88,6 +90,16 @@ async fn set_app_ignore(
     tx: State<'_, UiCmdTx>,
 ) -> Result<(), String> {
     tx.0.send(UiMsg::SetAppIgnore { id, ignore, note })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn set_advisor_settings(
+    settings: AdvisorSettingsUpdate,
+    tx: State<'_, UiCmdTx>,
+) -> Result<(), String> {
+    tx.0.send(UiMsg::SetAdvisorSettings(Box::new(settings)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -323,6 +335,7 @@ fn main() {
             run_updates_now,
             set_updater_settings,
             set_app_ignore,
+            set_advisor_settings,
             util::gbp_per_usd,
             util::open_url
         ])

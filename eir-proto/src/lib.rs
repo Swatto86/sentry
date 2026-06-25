@@ -27,6 +27,47 @@ pub struct StatusPayload {
     /// keeps an older payload (without this field) decodable.
     #[serde(default)]
     pub updater: Option<UpdaterStatus>,
+    /// Advisor-mode status (self-tuning reasoning effort/model). `#[serde(default)]`
+    /// for backward-compatible decode.
+    #[serde(default)]
+    pub advisor: Option<AdvisorStatus>,
+}
+
+/// Advisor-mode status: whether the last analysis escalated to deeper reasoning, and
+/// the day's escalation spend.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AdvisorStatus {
+    pub enabled: bool,
+    /// Whether the most recent analysis cycle escalated.
+    pub escalated: bool,
+    /// The model escalated to (empty if effort-only or not escalated).
+    pub escalation_model: String,
+    /// Why it escalated ("the agent flagged ambiguity", "confidence was low").
+    pub reason: String,
+    /// Escalation AI spend so far today (USD).
+    pub spent_today_usd: f64,
+    /// Editable advisor settings, surfaced for the Settings panel.
+    pub settings: AdvisorSettingsView,
+}
+
+/// Advisor settings shown in the UI.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AdvisorSettingsView {
+    pub enabled: bool,
+    pub escalation_model: String,
+    pub escalation_effort: String,
+    pub low_confidence_threshold: f32,
+    pub budget_usd_per_day: f64,
+}
+
+/// An advisor-settings change from the UI.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct AdvisorSettingsUpdate {
+    pub enabled: bool,
+    pub escalation_model: String,
+    pub escalation_effort: String,
+    pub low_confidence_threshold: f32,
+    pub budget_usd_per_day: f64,
 }
 
 /// Live status of the autonomous app updater, rendered by the UI.
@@ -255,4 +296,6 @@ pub enum UiMsg {
         ignore: bool,
         note: String,
     },
+    /// Apply advisor settings live (no service restart).
+    SetAdvisorSettings(Box<AdvisorSettingsUpdate>),
 }
