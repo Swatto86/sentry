@@ -447,13 +447,14 @@
         </div>
         <label for="set-native-enabled">AI-found installers</label>
         <input id="set-native-enabled" type="checkbox" style="width:auto; justify-self:start;">
-        <label for="set-sigpol">Installer signature</label>
+        <label for="set-sigpol">AI-installer signature</label>
         <select id="set-sigpol">
-          <option value="require_valid">Require valid signature (default)</option>
-          <option value="require_publisher_match">Require publisher match</option>
+          <option value="require_publisher_match">Strictest — valid signature + matching publisher</option>
+          <option value="require_valid">Require a valid signature (default)</option>
           <option value="allow_unsigned">Allow unsigned — least safe</option>
         </select>
       </div>
+      <div class="set-note">Strictest → least-safe. This gates only <em>AI-found installers</em>; winget/Chocolatey/Store packages are trusted by their source. “Publisher match” needs a valid signature first, so unsigned installers (e.g. AutoHotkey and some open-source tools) are blocked under both signature options — update those via Chocolatey instead, or choose “Allow unsigned” (not recommended for unattended installs).</div>
       <div class="set-actions">
         <button class="set-save" id="set-upd-save" style="background:var(--blue)">Save updater settings</button>
         <span class="upd-note" id="set-upd-status"></span>
