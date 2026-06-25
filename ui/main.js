@@ -375,7 +375,6 @@ function renderUpdater(u) {
   }
 
   const bits = [];
-  if (u.running && u.phase) bits.push(esc(u.phase));
   if (u.last_run) bits.push('last run ' + ago(u.last_run));
   if (u.enabled && u.next_run) bits.push('next in ' + until(u.next_run));
   if (u.last_cost_usd) bits.push('~' + fmtGbp(u.last_cost_usd));
@@ -385,7 +384,10 @@ function renderUpdater(u) {
   if (u.apps && u.apps.length) {
     appsEl.innerHTML = u.apps.map(updaterAppRow).join('');
   } else if (u.running) {
-    appsEl.innerHTML = '<div class="empty">Checking for updates…</div>';
+    // Show the live stage ("checking…", "updating {app}…") so the card visibly
+    // progresses instead of looking frozen.
+    const phase = (u.phase && u.phase !== 'idle') ? u.phase : 'Checking for updates…';
+    appsEl.innerHTML = `<div class="empty">${esc(phase)}</div>`;
   } else if (u.last_run) {
     appsEl.innerHTML = '<div class="empty">Everything up to date.</div>';
   } else {

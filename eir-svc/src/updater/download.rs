@@ -10,6 +10,7 @@
 
 use super::config::SignaturePolicy;
 use super::plan::{url_acceptable, InstallPlan, InstallerKind};
+use super::proc::{self, VERIFY};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
@@ -137,17 +138,11 @@ async fn authenticode(file: &Path) -> Signature {
          if ($s.SignerCertificate) {{ $subj = $s.SignerCertificate.Subject }}; \
          Write-Output ($s.Status.ToString() + '|' + $subj)"
     );
-    let raw = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await
-    .ok()
-    .and_then(|r| r.ok())
-    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    .unwrap_or_default();
+    // A timed-out signature read yields non-"Valid" text, so the gate fails closed.
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", &script]);
+    let (_code, out) = proc::run_capped_cmd(cmd, VERIFY).await;
+    let raw = out.trim().to_string();
 
     let (status, subject) = raw
         .split_once('|')

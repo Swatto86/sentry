@@ -9,13 +9,11 @@ use crate::updater::config::UpdaterConfig;
 use crate::updater::domain::{Method, UpdateCandidate};
 use crate::updater::methods::{choco, msstore, scoop, winget};
 use crate::updater::names::{clean_app_name, match_installed};
+use crate::updater::proc::{self, LIST};
 use crate::updater::version::is_newer;
 use crate::updater::winget_parse::parse_unmanaged;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::os::windows::process::CommandExt;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Cap on apps sent to the AI in one batch, to bound cost/latency.
 const AI_CHECK_CAP: usize = 20;
@@ -193,21 +191,15 @@ async fn check_unmanaged(
     model_override: &str,
     managed: &HashSet<String>,
 ) -> Result<(Vec<UpdateCandidate>, f64, Option<String>), String> {
-    let list_out = tokio::task::spawn_blocking(|| {
-        std::process::Command::new("winget")
-            .args([
-                "list",
-                "--accept-source-agreements",
-                "--disable-interactivity",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| format!("winget is not available: {e}"))?;
+    let mut cmd = std::process::Command::new("winget");
+    cmd.args([
+        "list",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]);
+    let (_code, list_text) = proc::run_capped_cmd(cmd, LIST).await;
 
-    let mut apps = parse_unmanaged(&String::from_utf8_lossy(&list_out.stdout), managed);
+    let mut apps = parse_unmanaged(&list_text, managed);
     apps.retain(|(n, _)| !ignored(cfg, &n.to_lowercase()));
     let total = apps.len();
     let mut note = None;

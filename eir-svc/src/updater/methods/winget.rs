@@ -7,22 +7,22 @@
 use crate::updater::domain::{
     classify_error, AttemptOutcome, ErrorCategory, Method, UpdateCandidate, Verification,
 };
+use crate::updater::proc::{self, INSTALL, LIST};
 use crate::updater::verify::{verify_app, VerifyTarget};
 use crate::updater::winget_parse::{parse_upgrades, AppUpdate};
-use std::os::windows::process::CommandExt;
-
-/// CREATE_NO_WINDOW — keep the console-based winget hidden.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// List apps with an available update (`winget upgrade`). Runs unprivileged-style
 /// (listing needs no special rights) and parses the fixed-width table.
 pub async fn list_updates() -> Vec<AppUpdate> {
-    let (_code, out) = run_winget(vec![
-        "upgrade".to_string(),
-        "--include-unknown".to_string(),
-        "--accept-source-agreements".to_string(),
-        "--disable-interactivity".to_string(),
-    ])
+    let (_code, out) = run_winget(
+        vec![
+            "upgrade".to_string(),
+            "--include-unknown".to_string(),
+            "--accept-source-agreements".to_string(),
+            "--disable-interactivity".to_string(),
+        ],
+        LIST,
+    )
     .await;
     parse_upgrades(&out)
 }
@@ -50,27 +50,8 @@ fn upgrade_args(id: &str, force: bool) -> Vec<String> {
 /// elevation wrapper is needed; winget also suppresses its live progress bar when
 /// stdout isn't a console, which keeps the capture clean. Shared with the Store
 /// method (which is winget with `--source msstore`).
-pub(crate) async fn run_winget(args: Vec<String>) -> (i32, String) {
-    let res = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("winget")
-            .args(&args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await;
-    match res {
-        Ok(Ok(o)) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-            let e = String::from_utf8_lossy(&o.stderr);
-            if !e.trim().is_empty() {
-                s.push('\n');
-                s.push_str(e.trim());
-            }
-            (o.status.code().unwrap_or(-1), s)
-        }
-        Ok(Err(e)) => (-1, format!("winget could not be launched: {e}")),
-        Err(e) => (-1, format!("winget task failed: {e}")),
-    }
+pub(crate) async fn run_winget(args: Vec<String>, dur: std::time::Duration) -> (i32, String) {
+    proc::run_capped("winget", &args, dur).await
 }
 
 /// winget refused because a portable package's files changed after install — its
@@ -97,10 +78,10 @@ pub async fn attempt_with(candidate: &UpdateCandidate, force_first: bool) -> Att
         }
     };
 
-    let (mut code, mut output) = run_winget(upgrade_args(&id, force_first)).await;
+    let (mut code, mut output) = run_winget(upgrade_args(&id, force_first), INSTALL).await;
     // Only auto-escalate to --force when we didn't already start with it.
     if !force_first && code != 0 && portable_modified(&output) {
-        let (c, o) = run_winget(upgrade_args(&id, true)).await;
+        let (c, o) = run_winget(upgrade_args(&id, true), INSTALL).await;
         code = c;
         output = o;
     }

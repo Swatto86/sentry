@@ -8,18 +8,22 @@ use crate::updater::domain::{
     classify_error, AttemptOutcome, ErrorCategory, Method, UpdateCandidate, Verification,
 };
 use crate::updater::methods::winget::{clean_winget_output, run_winget};
+use crate::updater::proc::{INSTALL, LIST};
 use crate::updater::verify::{verify_app, VerifyTarget};
 use crate::updater::winget_parse::{parse_upgrades, AppUpdate};
 
 /// List Store apps with an available update.
 pub async fn list_updates() -> Vec<AppUpdate> {
-    let (_code, out) = run_winget(vec![
-        "upgrade".to_string(),
-        "--source".to_string(),
-        "msstore".to_string(),
-        "--accept-source-agreements".to_string(),
-        "--disable-interactivity".to_string(),
-    ])
+    let (_code, out) = run_winget(
+        vec![
+            "upgrade".to_string(),
+            "--source".to_string(),
+            "msstore".to_string(),
+            "--accept-source-agreements".to_string(),
+            "--disable-interactivity".to_string(),
+        ],
+        LIST,
+    )
     .await;
     parse_upgrades(&out)
 }
@@ -37,18 +41,21 @@ pub async fn attempt(candidate: &UpdateCandidate) -> AttemptOutcome {
         }
     };
 
-    let (code, output) = run_winget(vec![
-        "upgrade".to_string(),
-        "--id".to_string(),
-        id.clone(),
-        "--exact".to_string(),
-        "--source".to_string(),
-        "msstore".to_string(),
-        "--silent".to_string(),
-        "--accept-package-agreements".to_string(),
-        "--accept-source-agreements".to_string(),
-        "--disable-interactivity".to_string(),
-    ])
+    let (code, output) = run_winget(
+        vec![
+            "upgrade".to_string(),
+            "--id".to_string(),
+            id.clone(),
+            "--exact".to_string(),
+            "--source".to_string(),
+            "msstore".to_string(),
+            "--silent".to_string(),
+            "--accept-package-agreements".to_string(),
+            "--accept-source-agreements".to_string(),
+            "--disable-interactivity".to_string(),
+        ],
+        INSTALL,
+    )
     .await;
 
     let clean = clean_winget_output(&output);

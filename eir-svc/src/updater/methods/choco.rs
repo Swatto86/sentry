@@ -9,11 +9,10 @@ use crate::updater::domain::{
     classify_error, AttemptOutcome, ErrorCategory, Method, UpdateCandidate, Verification,
 };
 use crate::updater::methods::detect;
+use crate::updater::proc::{self, INSTALL, LIST};
 use crate::updater::verify::{verify_app, VerifyTarget};
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use std::time::Duration;
 
 /// One outdated Chocolatey package.
 pub struct ChocoUpdate {
@@ -50,27 +49,10 @@ fn parse_outdated(text: &str) -> Vec<ChocoUpdate> {
     out
 }
 
-async fn run(choco: PathBuf, args: Vec<String>) -> (i32, String) {
-    let res = tokio::task::spawn_blocking(move || {
-        std::process::Command::new(choco)
-            .args(&args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await;
-    match res {
-        Ok(Ok(o)) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-            let e = String::from_utf8_lossy(&o.stderr);
-            if !e.trim().is_empty() {
-                s.push('\n');
-                s.push_str(e.trim());
-            }
-            (o.status.code().unwrap_or(-1), s)
-        }
-        Ok(Err(e)) => (-1, format!("choco could not be launched: {e}")),
-        Err(e) => (-1, format!("choco task failed: {e}")),
-    }
+async fn run(choco: PathBuf, args: Vec<String>, dur: Duration) -> (i32, String) {
+    let mut cmd = std::process::Command::new(choco);
+    cmd.args(&args);
+    proc::run_capped_cmd(cmd, dur).await
 }
 
 /// List outdated Chocolatey packages.
@@ -85,6 +67,7 @@ pub async fn list_outdated() -> Vec<ChocoUpdate> {
             "-r".to_string(),
             "--no-color".to_string(),
         ],
+        LIST,
     )
     .await;
     parse_outdated(&out)
@@ -119,6 +102,7 @@ pub async fn attempt(candidate: &UpdateCandidate) -> AttemptOutcome {
             "--no-progress".to_string(),
             "--no-color".to_string(),
         ],
+        INSTALL,
     )
     .await;
 

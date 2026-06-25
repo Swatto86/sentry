@@ -5,13 +5,11 @@
 //! comparison itself is pure and unit-tested in `version`; this module is the I/O.
 
 use super::domain::Verification;
+use super::proc::{self, VERIFY};
 use super::version::classify_version;
 use super::winget_parse::{column, winget_table};
-use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::time::Duration;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// What to read the installed version from.
 pub enum VerifyTarget {
@@ -64,24 +62,16 @@ pub async fn verify_app(target: &VerifyTarget, expected: &str) -> (Verification,
 
 /// Read an installed app's version from `winget list --id <id> --exact`.
 async fn winget_installed_version(id: &str) -> Option<String> {
-    let id = id.to_string();
-    let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("winget")
-            .args([
-                "list",
-                "--id",
-                &id,
-                "--exact",
-                "--accept-source-agreements",
-                "--disable-interactivity",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let mut cmd = std::process::Command::new("winget");
+    cmd.args([
+        "list",
+        "--id",
+        id,
+        "--exact",
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]);
+    let (_code, text) = proc::run_capped_cmd(cmd, VERIFY).await;
     let (offsets, rows) = winget_table(&text);
     rows.first()
         .map(|r| column(&offsets, r, "Version"))
@@ -91,23 +81,15 @@ async fn winget_installed_version(id: &str) -> Option<String> {
 /// Read an installed app's version from `winget list --name <name>`, matching the
 /// row whose Name overlaps the queried name (display names are fuzzy).
 async fn winget_installed_version_by_name(name: &str) -> Option<String> {
-    let q = name.to_string();
-    let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("winget")
-            .args([
-                "list",
-                "--name",
-                &q,
-                "--accept-source-agreements",
-                "--disable-interactivity",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
+    let mut cmd = std::process::Command::new("winget");
+    cmd.args([
+        "list",
+        "--name",
+        name,
+        "--accept-source-agreements",
+        "--disable-interactivity",
+    ]);
+    let (_code, text) = proc::run_capped_cmd(cmd, VERIFY).await;
     let (offsets, rows) = winget_table(&text);
     let lname = name.to_lowercase();
     for r in &rows {
@@ -132,16 +114,10 @@ async fn exe_file_version(path: &str) -> Option<String> {
         "try {{ (Get-Item -LiteralPath '{}').VersionInfo.ProductVersion }} catch {{ '' }}",
         path.replace('\'', "''")
     );
-    let out = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await
-    .ok()?
-    .ok()?;
-    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args(["-NoProfile", "-Command", &script]);
+    let (_code, out) = proc::run_capped_cmd(cmd, VERIFY).await;
+    let v = out.trim().to_string();
     if v.is_empty() {
         None
     } else {

@@ -8,11 +8,10 @@ use crate::updater::domain::{
     classify_error, AttemptOutcome, ErrorCategory, Method, UpdateCandidate, Verification,
 };
 use crate::updater::methods::detect;
+use crate::updater::proc::{self, INSTALL, LIST};
 use crate::updater::version::is_newer;
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+use std::time::Duration;
 
 /// One outdated Scoop app.
 pub struct ScoopUpdate {
@@ -21,35 +20,25 @@ pub struct ScoopUpdate {
     pub available: String,
 }
 
-/// Run a scoop command via its .cmd shim in the user's profile context.
-async fn run_scoop(profile: String, shim: PathBuf, args: Vec<String>) -> (i32, String) {
-    let res = tokio::task::spawn_blocking(move || {
-        let homepath = profile.strip_prefix("C:").unwrap_or(&profile).to_string();
-        std::process::Command::new("cmd")
-            .arg("/c")
-            .arg(&shim)
-            .args(&args)
-            .env("USERPROFILE", &profile)
-            .env("HOME", &profile)
-            .env("HOMEDRIVE", "C:")
-            .env("HOMEPATH", homepath)
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
-    .await;
-    match res {
-        Ok(Ok(o)) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-            let e = String::from_utf8_lossy(&o.stderr);
-            if !e.trim().is_empty() {
-                s.push('\n');
-                s.push_str(e.trim());
-            }
-            (o.status.code().unwrap_or(-1), s)
-        }
-        Ok(Err(e)) => (-1, format!("scoop could not be launched: {e}")),
-        Err(e) => (-1, format!("scoop task failed: {e}")),
-    }
+/// Run a scoop command via its .cmd shim in the user's profile context. Bounded by
+/// `dur`: scoop shells out to git/network, so a stall must not wedge the cycle. (The
+/// timeout kills the `cmd` shim; a grandchild git/scoop process may briefly linger.)
+async fn run_scoop(
+    profile: String,
+    shim: PathBuf,
+    args: Vec<String>,
+    dur: Duration,
+) -> (i32, String) {
+    let homepath = profile.strip_prefix("C:").unwrap_or(&profile).to_string();
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.arg("/c")
+        .arg(&shim)
+        .args(&args)
+        .env("USERPROFILE", &profile)
+        .env("HOME", &profile)
+        .env("HOMEDRIVE", "C:")
+        .env("HOMEPATH", homepath);
+    proc::run_capped_cmd(cmd, dur).await
 }
 
 /// Parse `scoop status`: a whitespace-aligned table whose first three columns are
@@ -91,7 +80,7 @@ pub async fn list_outdated() -> Vec<ScoopUpdate> {
     let Some((profile, shim)) = detect::scoop_install() else {
         return Vec::new();
     };
-    let (_code, out) = run_scoop(profile, shim, vec!["status".to_string()]).await;
+    let (_code, out) = run_scoop(profile, shim, vec!["status".to_string()], LIST).await;
     parse_status(&out)
 }
 
@@ -111,7 +100,13 @@ pub async fn attempt(candidate: &UpdateCandidate) -> AttemptOutcome {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| candidate.name.clone());
 
-    let (code, output) = run_scoop(profile, shim, vec!["update".to_string(), app.clone()]).await;
+    let (code, output) = run_scoop(
+        profile,
+        shim,
+        vec!["update".to_string(), app.clone()],
+        INSTALL,
+    )
+    .await;
     let mut out = AttemptOutcome::failed(Method::Scoop, ErrorCategory::Unknown, String::new());
     out.exit_code = Some(code);
     if code == 0 {

@@ -20,6 +20,7 @@ pub mod methods;
 pub mod names;
 pub mod orchestrator;
 pub mod plan;
+pub mod proc;
 pub mod verify;
 pub mod version;
 pub mod winget_parse;

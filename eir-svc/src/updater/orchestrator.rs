@@ -11,13 +11,14 @@ use crate::updater::domain::{
     AttemptOutcome, ErrorCategory, Method, NextStep, Remedy, UpdateCandidate, Verification,
 };
 use crate::updater::methods::{choco, detect, msstore, native, scoop, winget};
-use crate::updater::{check, diagnose, history};
+use crate::updater::{check, diagnose, history, proc};
 use sqlx::SqlitePool;
-use std::os::windows::process::CommandExt;
 use tracing::warn;
 
-/// CREATE_NO_WINDOW — keep the taskkill console hidden.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Coarse progress messages a running cycle emits so the UI's phase label tracks
+/// reality ("checking…" → "updating {app}…") instead of freezing on the start label.
+/// A closed/full receiver is ignored — progress is best-effort and never blocks work.
+pub type ProgressTx = tokio::sync::mpsc::Sender<String>;
 
 /// Everything an attempt needs that isn't the candidate itself.
 pub struct EngineCtx<'a> {
@@ -38,12 +39,11 @@ async fn kill_process(name: &str) {
     if safe.len() < 3 {
         return;
     }
-    let _ = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("taskkill")
-            .args(["/IM", &safe, "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    })
+    let _ = proc::run_capped(
+        "taskkill",
+        &["/IM".to_string(), safe, "/F".to_string()],
+        proc::PROBE,
+    )
     .await;
 }
 
@@ -300,7 +300,13 @@ pub fn app_rows(summary: &CycleSummary) -> Vec<eir_proto::UpdaterAppRow> {
 /// Run one full cycle: check for candidates, heal each (bounded by the per-run app
 /// and budget caps), and persist every attempt. The cycle id groups this run's
 /// attempts in the history table.
-pub async fn run_cycle(pool: &SqlitePool, ctx: &EngineCtx<'_>, cycle_id: i64) -> CycleSummary {
+pub async fn run_cycle(
+    pool: &SqlitePool,
+    ctx: &EngineCtx<'_>,
+    cycle_id: i64,
+    progress: &ProgressTx,
+) -> CycleSummary {
+    let _ = progress.send("checking…".to_string()).await;
     let available = available_methods(ctx.config, ctx.ai).await;
     let check = check::collect(ctx.ai, ctx.config, ctx.model_override, &available).await;
     let budget = ctx.config.budget_usd_per_run;
@@ -325,6 +331,7 @@ pub async fn run_cycle(pool: &SqlitePool, ctx: &EngineCtx<'_>, cycle_id: i64) ->
         } else {
             f64::INFINITY
         };
+        let _ = progress.send(format!("updating {}…", cand.name)).await;
         let outcomes = heal(&cand, ctx, &available, remaining).await;
         spent += outcomes.iter().map(|o| o.cost_usd).sum::<f64>();
         if let Err(e) = history::record_attempts(pool, cycle_id, &cand, &outcomes).await {

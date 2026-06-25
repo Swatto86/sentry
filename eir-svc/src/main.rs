@@ -303,32 +303,52 @@ fn spawn_update_cycle(
     cfg: &config::Config,
     db: &SqlitePool,
     done_tx: &tokio::sync::mpsc::Sender<updater::orchestrator::CycleSummary>,
+    progress_tx: &updater::orchestrator::ProgressTx,
 ) {
     let ai = ai::client::AiClient::new(&cfg.api).ok();
     let updater_cfg = cfg.updater.clone();
     let model = cfg.api.update_check_model.clone();
     let pool = db.clone();
     let tx = done_tx.clone();
+    let progress = progress_tx.clone();
     let cycle_id = chrono::Utc::now().timestamp();
+    // Hard ceiling on a whole cycle. Per-command timeouts already bound each external
+    // call, so a healthy run finishes far inside this; it is the last-resort backstop
+    // that guarantees `updater_running` is always released even if something
+    // unforeseen wedges.
+    const CYCLE_MAX: Duration = Duration::from_secs(60 * 60);
     tokio::spawn(async move {
-        // Run the cycle in an inner task so a panic surfaces as a JoinError instead
-        // of silently aborting — otherwise no summary is sent and `updater_running`
-        // would latch true forever, wedging every future cycle.
-        let inner = tokio::spawn(async move {
+        // Run the cycle in an inner task so a panic surfaces as a JoinError (not a
+        // silent abort) AND a watchdog can stop a hang — either way a summary is sent
+        // and `updater_running` is released, so the updater can never latch "running"
+        // forever and wedge every future cycle.
+        let mut inner = tokio::spawn(async move {
             let ctx = updater::orchestrator::EngineCtx {
                 ai: ai.as_ref(),
                 config: &updater_cfg,
                 model_override: &model,
             };
-            updater::orchestrator::run_cycle(&pool, &ctx, cycle_id).await
+            updater::orchestrator::run_cycle(&pool, &ctx, cycle_id, &progress).await
         });
-        let summary = inner
-            .await
-            .unwrap_or_else(|_| updater::orchestrator::CycleSummary {
+        let summary = match tokio::time::timeout(CYCLE_MAX, &mut inner).await {
+            Ok(Ok(summary)) => summary,
+            Ok(Err(_join)) => updater::orchestrator::CycleSummary {
                 results: Vec::new(),
                 notes: vec!["update cycle aborted unexpectedly".to_string()],
                 cost_usd: 0.0,
-            });
+            },
+            Err(_elapsed) => {
+                inner.abort();
+                updater::orchestrator::CycleSummary {
+                    results: Vec::new(),
+                    notes: vec![format!(
+                        "update cycle exceeded {}m and was stopped",
+                        CYCLE_MAX.as_secs() / 60
+                    )],
+                    cost_usd: 0.0,
+                }
+            }
+        };
         let _ = tx.send(summary).await;
     });
 }
@@ -600,6 +620,9 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     // Finished update cycles report back here; an in-flight cycle never blocks the loop.
     let (update_done_tx, mut update_done_rx) =
         tokio::sync::mpsc::channel::<updater::orchestrator::CycleSummary>(2);
+    // Coarse live progress ("checking…", "updating {app}…") from a running cycle, so
+    // the UI's phase label tracks reality instead of freezing on the start label.
+    let (update_progress_tx, mut update_progress_rx) = tokio::sync::mpsc::channel::<String>(16);
     let mut cycle_count = 0u64;
     // Last analysed actionable-signal fingerprint; identical states are skipped.
     let mut last_fingerprint: Option<String> = None;
@@ -637,6 +660,16 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         };
                         info!(apps = st.updater.apps.len(), "Update cycle complete");
                         pipe.broadcast_status(build_status(&st));
+                        continue;
+                    }
+                    Some(phase) = update_progress_rx.recv() => {
+                        // Live stage of a running cycle. Guarded on `updater_running` so a
+                        // straggling message can't overwrite the "idle" a just-finished
+                        // cycle set.
+                        if st.updater_running {
+                            st.updater.phase = phase;
+                            pipe.broadcast_status(build_status(&st));
+                        }
                         continue;
                     }
                     Some(cmd) = ui_rx.recv() => {
@@ -747,7 +780,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 st.updater.enabled = true;
                                 st.updater.phase = "checking…".to_string();
                                 pipe.broadcast_status(build_status(&st));
-                                spawn_update_cycle(&cfg, &db, &update_done_tx);
+                                spawn_update_cycle(&cfg, &db, &update_done_tx, &update_progress_tx);
                             }
                         }
                         UiMsg::UpdateUpdaterSettings(update) => {
@@ -853,7 +886,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         st.updater.enabled = true;
                         st.updater.phase = "checking…".to_string();
                         pipe.broadcast_status(build_status(&st));
-                        spawn_update_cycle(&cfg, &db, &update_done_tx);
+                        spawn_update_cycle(&cfg, &db, &update_done_tx, &update_progress_tx);
                     }
                 }
 
