@@ -17,7 +17,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache Rust build artefacts
         uses: swatinem/rust-cache@v2

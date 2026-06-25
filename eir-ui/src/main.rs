@@ -3,8 +3,8 @@
 mod pipe_client;
 mod util;
 
-use pipe_client::SharedStatus;
 use eir_proto::{SettingsUpdate, StatusPayload, UiMsg, UpdaterSettingsUpdate};
+use pipe_client::SharedStatus;
 use std::sync::{Arc, Mutex};
 use tauri::{
     image::Image,
@@ -126,12 +126,12 @@ fn decode_icon() -> IconBase {
 /// `None` means leave the icon untouched (the original green app icon).
 fn status_accent(status: &str) -> Option<[u8; 3]> {
     match status {
-        "Active" => None, // original green icon — exactly like the app icon
-        "Warning" => Some([234, 179, 8]),       // amber
+        "Active" => None,                 // original green icon — exactly like the app icon
+        "Warning" => Some([234, 179, 8]), // amber
         "PendingApproval" => Some([249, 115, 22]), // orange
-        "Executing" => Some([59, 130, 246]),    // blue
+        "Executing" => Some([59, 130, 246]), // blue
         "Error" | "ServiceDisconnected" => Some([239, 68, 68]), // red
-        _ => Some([107, 114, 128]),             // grey (connecting / unknown)
+        _ => Some([107, 114, 128]),       // grey (connecting / unknown)
     }
 }
 

@@ -140,9 +140,12 @@ mod tests {
         server.connect().await.expect("server accept client");
 
         // Send an Approve exactly as the Approve button does.
-        tx.send(UiMsg::Approve { id: 7, approved: true })
-            .await
-            .expect("send cmd");
+        tx.send(UiMsg::Approve {
+            id: 7,
+            approved: true,
+        })
+        .await
+        .expect("send cmd");
 
         // The server must receive the JSON line.
         let mut buf = vec![0u8; 256];

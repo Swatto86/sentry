@@ -11,11 +11,11 @@ mod safety;
 mod signals;
 mod updater;
 
-use models::{FixAction, PendingApproval, SignalSnapshot, SystemState};
 use eir_proto::{
-    ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg, UiSettings, UpdaterStatus,
-    UsageSummary,
+    ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg, UiSettings,
+    UpdaterStatus, UsageSummary,
 };
+use models::{FixAction, PendingApproval, SignalSnapshot, SystemState};
 use sqlx::SqlitePool;
 use std::{
     collections::{HashSet, VecDeque},
@@ -505,7 +505,10 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     match audit::load_pending_approvals(&db).await {
         Ok(pending) => {
             if !pending.is_empty() {
-                info!(count = pending.len(), "Restored pending approvals from previous run");
+                info!(
+                    count = pending.len(),
+                    "Restored pending approvals from previous run"
+                );
             }
             st.pending = pending;
         }

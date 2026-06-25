@@ -148,7 +148,11 @@ impl ActionExplanation {
         if let Some(first) = full.lines().find(|l| !l.trim().is_empty()) {
             let trimmed = first.trim();
             let snippet: String = trimmed.chars().take(60).collect();
-            let ellipsis = if trimmed.chars().count() > 60 { "…" } else { "" };
+            let ellipsis = if trimmed.chars().count() > 60 {
+                "…"
+            } else {
+                ""
+            };
             self.target = format!("PowerShell: {snippet}{ellipsis}");
         }
         self
@@ -266,8 +270,14 @@ fn classify_file(path: &str) -> String {
             .unwrap_or(false)
     };
 
-    if dir_hits(&["\\cache", "\\temp", "\\tmp\\", "\\prefetch", "crashdump", "minidump"])
-        || ext_is(&["tmp", "dmp", "etl", "old", "bak", "lock"])
+    if dir_hits(&[
+        "\\cache",
+        "\\temp",
+        "\\tmp\\",
+        "\\prefetch",
+        "crashdump",
+        "minidump",
+    ]) || ext_is(&["tmp", "dmp", "etl", "old", "bak", "lock"])
     {
         "Looks like a regenerable cache / temp / crash file — programs normally recreate these \
          automatically, so deleting it is usually low-risk."
@@ -284,7 +294,9 @@ fn classify_file(path: &str) -> String {
         "Looks like it lives in a personal folder (Documents/Desktop/etc.) — deleting it could be \
          permanent loss of your own data. Be sure before approving."
             .to_string()
-    } else if ext_is(&["json", "xml", "ini", "cfg", "conf", "config", "db", "sqlite", "dat"]) {
+    } else if ext_is(&[
+        "json", "xml", "ini", "cfg", "conf", "config", "db", "sqlite", "dat",
+    ]) {
         "Looks like a configuration or data file — the program may lose saved state or settings. \
          Many apps rebuild defaults on next launch, but confirm this one does."
             .to_string()
@@ -345,9 +357,11 @@ mod tests {
 
     #[test]
     fn cache_path_is_flagged_low_risk() {
-        assert!(classify_file("C:\\Users\\a\\AppData\\Local\\App\\Cache\\x.db")
-            .to_lowercase()
-            .contains("low-risk"));
+        assert!(
+            classify_file("C:\\Users\\a\\AppData\\Local\\App\\Cache\\x.db")
+                .to_lowercase()
+                .contains("low-risk")
+        );
     }
 
     #[test]
