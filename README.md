@@ -73,6 +73,10 @@ Each decision cycle (default every 10 minutes):
    times out and survives a service restart, so an approval is always waiting for
    you, not gone if you missed a pop-up.
 
+> **Architecture & design:** see [ARCHITECTURE.md](ARCHITECTURE.md) — a living document
+> covering every subsystem (signals, decision loop, executor/policy, updater,
+> persistence) and the design for Eir's planned machine-pattern self-improvement.
+
 ## AI providers
 
 Everything is configurable in the **Settings** panel — no file editing required.
