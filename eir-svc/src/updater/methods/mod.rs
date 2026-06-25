@@ -3,3 +3,4 @@
 //! orchestrator dispatches to them by [`super::domain::Method`] (exhaustive match).
 
 pub mod native;
+pub mod winget;

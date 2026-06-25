@@ -160,6 +160,9 @@ pub struct UpdateCandidate {
     pub name: String,
     /// Version currently installed.
     pub current: String,
+    /// Target version we expect after the update (winget's "Available", or the AI's
+    /// latest). Empty when unknown; used as the post-update verification target.
+    pub available: String,
     /// Method-specific package id where known (e.g. a winget `--id`).
     pub package_id: Option<String>,
     /// Methods to try, in order.

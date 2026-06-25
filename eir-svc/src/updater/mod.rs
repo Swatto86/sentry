@@ -17,11 +17,14 @@
 // into the service loop (Phase 8), at which point any genuinely dead code surfaces.
 #![allow(dead_code)]
 
+pub mod check;
 pub mod config;
 pub mod domain;
 pub mod download;
+pub mod history;
 pub mod methods;
 pub mod names;
+pub mod orchestrator;
 pub mod plan;
 pub mod verify;
 pub mod version;
