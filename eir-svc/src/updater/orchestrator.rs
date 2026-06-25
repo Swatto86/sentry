@@ -5,13 +5,18 @@
 //! decides — the AI only ever proposes within the bounds Rust allows.
 
 use crate::ai::client::AiClient;
-use crate::updater::check;
 use crate::updater::config::UpdaterConfig;
-use crate::updater::domain::{AttemptOutcome, ErrorCategory, Method, UpdateCandidate};
-use crate::updater::history;
+use crate::updater::domain::{
+    AttemptOutcome, ErrorCategory, Method, NextStep, Remedy, UpdateCandidate,
+};
 use crate::updater::methods::{native, winget};
+use crate::updater::{check, diagnose, history};
 use sqlx::SqlitePool;
+use std::os::windows::process::CommandExt;
 use tracing::warn;
+
+/// CREATE_NO_WINDOW — keep the taskkill console hidden.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Everything an attempt needs that isn't the candidate itself.
 pub struct EngineCtx<'a> {
@@ -21,14 +26,40 @@ pub struct EngineCtx<'a> {
     pub model_override: &'a str,
 }
 
-/// Run one method against one candidate.
+/// Kill a process the AI named as holding a lock. The name was already validated to
+/// appear in the captured error text; it is further reduced to a safe image-name
+/// charset and passed as an argument (never a shell string).
+async fn kill_process(name: &str) {
+    let safe: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        .collect();
+    if safe.len() < 3 {
+        return;
+    }
+    let _ = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("taskkill")
+            .args(["/IM", &safe, "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+    })
+    .await;
+}
+
+/// Run one method against one candidate, first applying any allow-listed remedy the
+/// diagnostician requested (kill a locking process, or force the upgrade).
 async fn dispatch(
     method: Method,
+    remedy: Option<&Remedy>,
     candidate: &UpdateCandidate,
     ctx: &EngineCtx<'_>,
 ) -> AttemptOutcome {
+    if let Some(Remedy::KillProcess { name }) = remedy {
+        kill_process(name).await;
+    }
+    let force = matches!(remedy, Some(Remedy::Force));
     match method {
-        Method::Winget => winget::attempt(candidate).await,
+        Method::Winget => winget::attempt_with(candidate, force).await,
         Method::Native => match ctx.ai {
             Some(ai) => {
                 let note = ctx.config.notes.get(&candidate.id).map(String::as_str);
@@ -74,8 +105,32 @@ fn next_method(order: &[Method], tried: &[Method], last: &AttemptOutcome) -> Opt
     order.iter().copied().find(|m| !tried.contains(m))
 }
 
-/// Heal one candidate: try methods until one verifies, an integrity failure is hit,
-/// the methods are exhausted, or the attempt cap is reached.
+/// Decide the next step after a non-terminal failure: the AI diagnostician (its
+/// proposal validated against the available/untried methods) when a provider is
+/// configured, otherwise the deterministic ladder. Returns the step and its AI cost.
+async fn decide_next(
+    ctx: &EngineCtx<'_>,
+    candidate: &UpdateCandidate,
+    last: &AttemptOutcome,
+    tried: &[Method],
+    order: &[Method],
+) -> (NextStep, f64) {
+    if let Some(ai) = ctx.ai {
+        return diagnose::diagnose(ai, ctx.model_override, candidate, last, tried, order).await;
+    }
+    match next_method(order, tried, last) {
+        Some(m) => (NextStep::SwitchTo(m), 0.0),
+        None => (
+            NextStep::GiveUp("all available methods tried".to_string()),
+            0.0,
+        ),
+    }
+}
+
+/// Heal one candidate: try a method, and on a non-terminal failure let the AI read
+/// the error and choose the next method (or an allow-listed remedy), repeating until
+/// one verifies, an integrity failure is hit, the methods are exhausted, or the
+/// attempt cap is reached.
 pub async fn heal(
     candidate: &UpdateCandidate,
     ctx: &EngineCtx<'_>,
@@ -90,16 +145,38 @@ pub async fn heal(
     let max = (ctx.config.max_attempts_per_app as usize).max(1);
     let mut attempts: Vec<AttemptOutcome> = Vec::new();
     let mut tried: Vec<Method> = Vec::new();
-    let mut next = order.first().copied();
+    let mut current: Option<(Method, Option<Remedy>)> = order.first().map(|&m| (m, None));
 
-    while let Some(method) = next {
+    while let Some((method, remedy)) = current.take() {
         if attempts.len() >= max {
             break;
         }
-        let outcome = dispatch(method, candidate, ctx).await;
+        let mut outcome = dispatch(method, remedy.as_ref(), candidate, ctx).await;
         tried.push(method);
-        next = next_method(&order, &tried, &outcome);
+
+        // Stop on success, a terminal integrity failure, or the last allowed attempt.
+        let done = outcome.success
+            || outcome
+                .category
+                .map(ErrorCategory::is_terminal)
+                .unwrap_or(false)
+            || attempts.len() + 1 >= max;
+        if done {
+            attempts.push(outcome);
+            break;
+        }
+
+        let (next, dcost) = decide_next(ctx, candidate, &outcome, &tried, &order).await;
+        outcome.cost_usd += dcost;
         attempts.push(outcome);
+
+        current = match next {
+            NextStep::SwitchTo(m) => Some((m, None)),
+            // We never reboot the machine unattended — defer instead.
+            NextStep::RetryWith(_, Remedy::RetryAfterReboot) => None,
+            NextStep::RetryWith(m, r) => Some((m, Some(r))),
+            NextStep::GiveUp(_) => None,
+        };
     }
     attempts
 }

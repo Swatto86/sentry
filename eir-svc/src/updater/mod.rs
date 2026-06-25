@@ -19,6 +19,7 @@
 
 pub mod check;
 pub mod config;
+pub mod diagnose;
 pub mod domain;
 pub mod download;
 pub mod history;

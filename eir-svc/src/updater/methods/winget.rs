@@ -80,9 +80,15 @@ fn portable_modified(output: &str) -> bool {
     l.contains("has been modified") && l.contains("--force")
 }
 
-/// Attempt to update one app via winget, retrying once with --force for the
-/// portable-modified case, then verify the version moved.
+/// Attempt to update one app via winget, then verify the version moved. Auto-retries
+/// once with --force for the portable-modified case.
 pub async fn attempt(candidate: &UpdateCandidate) -> AttemptOutcome {
+    attempt_with(candidate, false).await
+}
+
+/// As [`attempt`], but `force_first` runs the very first upgrade with `--force` —
+/// used when the AI diagnostician requests the Force remedy.
+pub async fn attempt_with(candidate: &UpdateCandidate, force_first: bool) -> AttemptOutcome {
     let id = match candidate.package_id.as_deref() {
         Some(id) if !id.trim().is_empty() => id.trim().to_string(),
         _ => {
@@ -94,8 +100,9 @@ pub async fn attempt(candidate: &UpdateCandidate) -> AttemptOutcome {
         }
     };
 
-    let (mut code, mut output) = run_winget(upgrade_args(&id, false)).await;
-    if code != 0 && portable_modified(&output) {
+    let (mut code, mut output) = run_winget(upgrade_args(&id, force_first)).await;
+    // Only auto-escalate to --force when we didn't already start with it.
+    if !force_first && code != 0 && portable_modified(&output) {
         let (c, o) = run_winget(upgrade_args(&id, true)).await;
         code = c;
         output = o;
