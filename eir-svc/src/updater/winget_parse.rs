@@ -47,7 +47,7 @@ fn header_offsets(text: &str) -> Vec<(&'static str, usize)> {
 /// Read one column's trimmed value from a row. A column spans from its own start
 /// to the next column's start (the last runs to end of line). Returns "" when the
 /// column is absent or starts past the row's end.
-fn column(offsets: &[(&'static str, usize)], row: &[char], label: &str) -> String {
+pub fn column(offsets: &[(&'static str, usize)], row: &[char], label: &str) -> String {
     let Some(idx) = offsets.iter().position(|&(l, _)| l == label) else {
         return String::new();
     };
@@ -70,7 +70,7 @@ fn column(offsets: &[(&'static str, usize)], row: &[char], label: &str) -> Strin
 /// Skips the progress-noise and header above the dashed separator, and stops at
 /// the "N upgrades available" footer (and the "explicit targeting" sub-table some
 /// winget versions append).
-fn winget_table(text: &str) -> (Vec<(&'static str, usize)>, Vec<Vec<char>>) {
+pub fn winget_table(text: &str) -> (Vec<(&'static str, usize)>, Vec<Vec<char>>) {
     let offsets = header_offsets(text);
     let mut rows = Vec::new();
     let mut in_table = false;

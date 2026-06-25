@@ -19,7 +19,9 @@
 
 pub mod config;
 pub mod domain;
+pub mod download;
 pub mod names;
 pub mod plan;
+pub mod verify;
 pub mod version;
 pub mod winget_parse;
