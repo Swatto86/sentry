@@ -107,7 +107,10 @@ max_installer_mb = 256        # largest native installer to download
 # Auto-install a missing package manager (Chocolatey/Scoop) when a method needs it.
 bootstrap_managers = true
 
-# Apps to skip entirely (by stable, version-stripped display name).
+# Apps to skip entirely (by stable, version-stripped display name). Matching ignores
+# Chocolatey package suffixes, so "discord" also covers "discord.install". Note: a few
+# apps that update themselves and hang package managers (e.g. Discord) are skipped
+# automatically and need no entry here.
 ignored = []
 
 # Per-app hints for the AI, e.g. tell it an app is self-built or where its real

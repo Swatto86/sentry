@@ -26,8 +26,37 @@ pub struct CheckResult {
     pub notes: Vec<String>,
 }
 
-fn ignored(cfg: &UpdaterConfig, id: &str) -> bool {
-    cfg.ignored.iter().any(|ig| ig.eq_ignore_ascii_case(id))
+/// Apps that update themselves and reliably fight or hang package managers, so the
+/// updater never tries to manage them. Discord (a Squirrel per-user installer) hangs
+/// `choco upgrade` for the full INSTALL timeout and, once it has self-updated, choco's
+/// stale version DB makes it retry every cycle. Matched against the base id (any choco
+/// package suffix stripped). Extend conservatively — only apps that genuinely keep
+/// themselves current, so skipping them is safe.
+const SELF_UPDATING: &[&str] = &["discord"];
+
+/// Strip a Chocolatey package suffix so `discord.install` and `discord` share one
+/// identity (`discord`). Choco splits many apps into `<name>` / `<name>.install` /
+/// `.portable` / `.app` packages; without this they are treated as separate candidates
+/// and a skip/ignore on one misses the others.
+fn base_id(id: &str) -> &str {
+    for suffix in [".install", ".portable", ".app", ".commandline"] {
+        if let Some(stripped) = id.strip_suffix(suffix) {
+            return stripped;
+        }
+    }
+    id
+}
+
+/// Whether a candidate id should be skipped: it's a known self-updater, or the user
+/// has ignored it (either the exact id or its base, so ignoring "discord" also covers
+/// the "discord.install" choco package).
+fn should_skip(cfg: &UpdaterConfig, id: &str) -> bool {
+    let base = base_id(id);
+    SELF_UPDATING.contains(&base)
+        || cfg
+            .ignored
+            .iter()
+            .any(|ig| ig.eq_ignore_ascii_case(id) || ig.eq_ignore_ascii_case(base))
 }
 
 /// Add a manager candidate if it isn't ignored or already covered by an
@@ -46,7 +75,7 @@ fn push_candidate(
     primary: Method,
 ) {
     let id = clean_app_name(name).to_lowercase();
-    if id.is_empty() || ignored(cfg, &id) || !seen.insert(id.clone()) {
+    if id.is_empty() || should_skip(cfg, &id) || !seen.insert(id.clone()) {
         return;
     }
     let mut methods = vec![primary];
@@ -200,7 +229,7 @@ async fn check_unmanaged(
     let (_code, list_text) = proc::run_capped_cmd(cmd, LIST).await;
 
     let mut apps = parse_unmanaged(&list_text, managed);
-    apps.retain(|(n, _)| !ignored(cfg, &n.to_lowercase()));
+    apps.retain(|(n, _)| !should_skip(cfg, &n.to_lowercase()));
     let total = apps.len();
     let mut note = None;
     if apps.len() > AI_CHECK_CAP {
@@ -278,7 +307,7 @@ fn native_candidates_from(
             continue;
         }
         let id = u.name.to_lowercase();
-        if ignored(cfg, &id) {
+        if should_skip(cfg, &id) {
             continue;
         }
         out.push(UpdateCandidate {
@@ -302,6 +331,37 @@ mod tests {
             name: name.to_string(),
             latest: latest.to_string(),
         }
+    }
+
+    #[test]
+    fn self_updaters_are_skipped_across_choco_variants() {
+        let cfg = UpdaterConfig::default();
+        // Both the plain and the .install choco package map to "discord" and skip.
+        assert!(should_skip(&cfg, "discord"));
+        assert!(should_skip(&cfg, "discord.install"));
+        // An unrelated app is not skipped.
+        assert!(!should_skip(&cfg, "vscode.install"));
+    }
+
+    #[test]
+    fn user_ignore_matches_base_and_variant() {
+        let cfg = UpdaterConfig {
+            ignored: vec!["winscp".to_string()],
+            ..UpdaterConfig::default()
+        };
+        // Ignoring the base name also covers the ".install" choco variant.
+        assert!(should_skip(&cfg, "winscp"));
+        assert!(should_skip(&cfg, "winscp.install"));
+        assert!(!should_skip(&cfg, "vscode"));
+    }
+
+    #[test]
+    fn base_id_strips_only_known_choco_suffixes() {
+        assert_eq!(base_id("discord.install"), "discord");
+        assert_eq!(base_id("foo.portable"), "foo");
+        // A dot that is part of the real name is left alone.
+        assert_eq!(base_id("node.js"), "node.js");
+        assert_eq!(base_id("paint.net"), "paint.net");
     }
 
     #[test]
