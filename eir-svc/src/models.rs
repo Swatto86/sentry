@@ -61,6 +61,40 @@ pub struct SystemState {
     pub network_errors: u32,
     pub disk_health: String,
     pub windows_update_status: String,
+    /// Windows security posture (firewall + Defender). Defaulted so an older
+    /// snapshot without the field still deserialises.
+    #[serde(default)]
+    pub security: SecurityPosture,
+}
+
+/// Security-relevant machine state the AI can diagnose and (with the matching
+/// fix-actions) repair: firewall profiles and Windows Defender.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SecurityPosture {
+    pub firewall: FirewallStatus,
+    pub defender: DefenderStatus,
+}
+
+/// Whether the Windows Firewall is on for each network profile. `true` = on.
+/// `None` means the state could not be read (don't treat unknown as a fault).
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct FirewallStatus {
+    pub domain: Option<bool>,
+    pub private: Option<bool>,
+    pub public: Option<bool>,
+}
+
+/// Windows Defender antivirus state, as reported by `Get-MpComputerStatus`.
+/// All fields are optional: if Defender is absent or the query fails, they stay
+/// `None` and the AI is told not to infer a fault from missing data.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct DefenderStatus {
+    /// Real-time (on-access) protection is enabled.
+    pub realtime_enabled: Option<bool>,
+    /// The antivirus engine is running (false when a third-party AV has taken over).
+    pub antivirus_enabled: Option<bool>,
+    /// Age of the signature definitions in days (0 = updated today).
+    pub signature_age_days: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -159,6 +193,17 @@ pub enum FixAction {
     FileDelete {
         path: String,
     },
+    // Phase 5 — security self-healing (safe, reversible)
+    /// Re-enable the Windows Firewall for a profile: domain | private | public | all.
+    FirewallEnable {
+        profile: String,
+    },
+    /// Update Windows Defender's signature definitions (`Update-MpSignature`).
+    /// Always safe — it only refreshes definitions.
+    DefenderSignatureUpdate,
+    /// Turn Windows Defender real-time (on-access) protection back on. Reversible,
+    /// but security-sensitive, so it is approval-gated, not auto-run.
+    DefenderRealtimeEnable,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

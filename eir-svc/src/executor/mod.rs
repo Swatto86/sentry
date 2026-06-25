@@ -4,6 +4,7 @@ pub mod logs;
 pub mod powershell;
 pub mod process;
 pub mod registry;
+pub mod security;
 pub mod services;
 pub mod software;
 pub mod tasks;
@@ -101,6 +102,16 @@ pub async fn execute(action: &FixAction) -> ExecutionResult {
         FixAction::ProcessKill { process_name } => {
             let n = process_name.clone();
             make_result(action, process::kill(&n).await)
+        }
+        FixAction::FirewallEnable { profile } => {
+            let p = profile.clone();
+            make_result(action, security::firewall_enable(&p).await)
+        }
+        FixAction::DefenderSignatureUpdate => {
+            make_result(action, security::defender_signature_update().await)
+        }
+        FixAction::DefenderRealtimeEnable => {
+            make_result(action, security::defender_realtime_enable().await)
         }
         FixAction::FileDelete { path } => {
             let safe = path.replace('\'', "''");

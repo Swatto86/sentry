@@ -49,6 +49,9 @@ AVAILABLE FIX ACTIONS (use the exact action key and fields shown):
   file_delete:           {{"action": "file_delete", "path": "C:\\Users\\...\\AppData\\Local\\App\\cache\\file.db"}}
                          -- Deletes a SINGLE FILE only (not directories). Use for corrupted caches,
                             lock files, bad config files, or crash dumps identified in log events.
+  firewall_enable:       {{"action": "firewall_enable", "profile": "all"}}      -- profile: domain|private|public|all
+  defender_signature_update: {{"action": "defender_signature_update"}}          -- refresh Defender definitions (always safe)
+  defender_realtime_enable:  {{"action": "defender_realtime_enable"}}           -- turn Defender real-time protection back on
 
 Analyze thoroughly. For each LOG EVENT above, draw on your knowledge of that program's
 known issues and common fixes — including specific registry keys, cache paths, config
@@ -124,6 +127,18 @@ Steam, Epic, etc.), browsers, chat/voice apps, editors, or VPN clients while the
 are up. process_kill is ONLY for a genuinely hung or orphaned BACKGROUND process that is the
 documented cause of an active fault — never a foreground or user-launched app. When unsure,
 do nothing.
+
+SECURITY POSTURE — the snapshot's "security" block reports the firewall and Windows
+Defender. These ARE faults worth fixing proactively, with the matching safe action:
+  - A firewall profile reported false (off) is a real exposure: propose firewall_enable
+    for that profile, or "all" if more than one is off. Re-enabling the firewall is safe
+    and reversible.
+  - Defender "realtime_enabled": false means on-access protection is OFF — propose
+    defender_realtime_enable. BUT if "antivirus_enabled" is false, a THIRD-PARTY antivirus
+    has taken over and Defender is passive by design — that is NORMAL, do NOT force it on.
+  - "signature_age_days" above ~3 means stale definitions: propose defender_signature_update.
+  - A field shown as null could not be read — treat it as unknown, NOT as a fault. Never
+    propose a security fix from missing data.
 
 Report at most the 5 most important problems, ordered by severity. If the system is healthy
 or the only findings are benign/unfixable, return an empty problems list. Keep every text

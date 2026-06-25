@@ -1,4 +1,6 @@
-use crate::models::{NetworkInterface, SystemState};
+use crate::models::{
+    DefenderStatus, FirewallStatus, NetworkInterface, SecurityPosture, SystemState,
+};
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 use std::sync::{Arc, Mutex};
@@ -256,6 +258,94 @@ fn get_windows_update_status() -> String {
     }
 }
 
+/// Read a REG_DWORD value, returning None if the key/value is missing or not a DWORD.
+fn read_reg_dword(root: HKEY, subkey: &str, value: &str) -> Option<u32> {
+    let subkey_w = wide(subkey);
+    let value_w = wide(value);
+    unsafe {
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(root, PCWSTR(subkey_w.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
+            return None;
+        }
+        let mut data: u32 = 0;
+        let mut data_len = std::mem::size_of::<u32>() as u32;
+        let ok = RegQueryValueExW(
+            hkey,
+            PCWSTR(value_w.as_ptr()),
+            None,
+            None,
+            Some(&mut data as *mut u32 as *mut u8),
+            Some(&mut data_len),
+        )
+        .is_ok();
+        let _ = RegCloseKey(hkey);
+        if ok && data_len as usize == std::mem::size_of::<u32>() {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
+/// Firewall on/off per profile, from the SharedAccess policy keys. The "standard"
+/// profile is what the UI calls "private". A missing value stays None (unknown),
+/// so the AI never reads "couldn't read it" as "firewall is off".
+fn get_firewall() -> FirewallStatus {
+    const BASE: &str =
+        "SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Parameters\\FirewallPolicy";
+    let read = |profile: &str| {
+        read_reg_dword(
+            HKEY_LOCAL_MACHINE,
+            &format!("{BASE}\\{profile}"),
+            "EnableFirewall",
+        )
+        .map(|v| v != 0)
+    };
+    FirewallStatus {
+        domain: read("DomainProfile"),
+        private: read("StandardProfile"),
+        public: read("PublicProfile"),
+    }
+}
+
+/// Parse the pipe-delimited line emitted by the Get-MpComputerStatus query:
+/// "<realtime>|<antivirus>|<signature_age_days>". Any field may be empty/garbage,
+/// in which case it parses to None rather than failing the whole snapshot.
+fn parse_defender_status(line: &str) -> DefenderStatus {
+    let mut parts = line.trim().split('|');
+    let parse_bool = |s: Option<&str>| match s.map(|x| x.trim().to_lowercase()) {
+        Some(v) if v == "true" => Some(true),
+        Some(v) if v == "false" => Some(false),
+        _ => None,
+    };
+    let realtime_enabled = parse_bool(parts.next());
+    let antivirus_enabled = parse_bool(parts.next());
+    let signature_age_days = parts.next().and_then(|s| s.trim().parse::<u32>().ok());
+    DefenderStatus {
+        realtime_enabled,
+        antivirus_enabled,
+        signature_age_days,
+    }
+}
+
+/// Query Windows Defender via PowerShell. Absent Defender / a failed query leaves
+/// every field None (handled by parse_defender_status on empty output).
+fn get_defender() -> DefenderStatus {
+    let out = std::process::Command::new("powershell.exe")
+        .args([
+            "-NonInteractive",
+            "-NoProfile",
+            "-Command",
+            "$s = Get-MpComputerStatus -ErrorAction SilentlyContinue; \
+             if ($s) { '{0}|{1}|{2}' -f $s.RealTimeProtectionEnabled, $s.AntivirusEnabled, $s.AntivirusSignatureAge }",
+        ])
+        .output();
+    match out {
+        Ok(o) => parse_defender_status(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => DefenderStatus::default(),
+    }
+}
+
 fn snapshot_state() -> SystemState {
     let uptime_secs = get_uptime_secs();
     let cpu_usage_percent = get_cpu_usage();
@@ -264,6 +354,10 @@ fn snapshot_state() -> SystemState {
     let (running_services_count, failed_services) = get_services();
     let network_interfaces = get_network_interfaces();
     let windows_update_status = get_windows_update_status();
+    let security = SecurityPosture {
+        firewall: get_firewall(),
+        defender: get_defender(),
+    };
 
     SystemState {
         uptime_secs,
@@ -278,6 +372,7 @@ fn snapshot_state() -> SystemState {
         network_errors: 0,
         disk_health: "unknown".to_string(),
         windows_update_status,
+        security,
     }
 }
 
@@ -334,5 +429,34 @@ pub fn current(shared: &SharedState) -> SystemState {
             network_errors: 0,
             disk_health: "unknown".to_string(),
             windows_update_status: "unknown".to_string(),
+            security: SecurityPosture::default(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_defender_status;
+
+    #[test]
+    fn defender_status_parses_a_healthy_line() {
+        let s = parse_defender_status("True|True|0\r\n");
+        assert_eq!(s.realtime_enabled, Some(true));
+        assert_eq!(s.antivirus_enabled, Some(true));
+        assert_eq!(s.signature_age_days, Some(0));
+    }
+
+    #[test]
+    fn defender_status_flags_disabled_realtime_and_stale_signatures() {
+        let s = parse_defender_status("False|True|14");
+        assert_eq!(s.realtime_enabled, Some(false));
+        assert_eq!(s.signature_age_days, Some(14));
+    }
+
+    #[test]
+    fn defender_status_empty_output_is_all_unknown() {
+        let s = parse_defender_status("");
+        assert_eq!(s.realtime_enabled, None);
+        assert_eq!(s.antivirus_enabled, None);
+        assert_eq!(s.signature_age_days, None);
+    }
 }

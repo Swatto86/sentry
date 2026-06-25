@@ -138,6 +138,9 @@ fn action_type_name(action: &FixAction) -> &'static str {
         FixAction::BcdEdit { .. } => "bcd_edit",
         FixAction::ProcessKill { .. } => "process_kill",
         FixAction::FileDelete { .. } => "file_delete",
+        FixAction::FirewallEnable { .. } => "firewall_enable",
+        FixAction::DefenderSignatureUpdate => "defender_signature_update",
+        FixAction::DefenderRealtimeEnable => "defender_realtime_enable",
     }
 }
 
@@ -169,5 +172,44 @@ mod tests {
             package_name: "NordVPN".into(),
         };
         assert!(matches!(pol.evaluate(&action, 0.99), Verdict::Block(_)));
+    }
+
+    fn policy_with(whitelist: &[&str]) -> ExecutionPolicy {
+        ExecutionPolicy {
+            execution: ExecutionConfig {
+                confidence_threshold: 0.80,
+                max_retries_per_issue: 3,
+                rate_limit_mins: 30,
+                auto_approve_on_success_rate: 0.95,
+            },
+            whitelist: WhitelistConfig {
+                actions: whitelist.iter().map(|s| s.to_string()).collect(),
+            },
+            blocklist: BlocklistConfig {
+                services: vec![],
+                paths: vec![],
+                actions: vec![],
+            },
+        }
+    }
+
+    /// A whitelisted security fix (firewall_enable) auto-runs at/above threshold,
+    /// while a security-sensitive one left off the whitelist still needs approval.
+    #[test]
+    fn security_actions_follow_the_whitelist() {
+        let pol = policy_with(&["firewall_enable", "defender_signature_update"]);
+
+        let fw = FixAction::FirewallEnable {
+            profile: "all".into(),
+        };
+        assert!(matches!(pol.evaluate(&fw, 0.90), Verdict::AutoApprove));
+        // Below the confidence threshold it is blocked, not auto-run.
+        assert!(matches!(pol.evaluate(&fw, 0.50), Verdict::Block(_)));
+
+        // Not whitelisted → approval required even at high confidence.
+        assert!(matches!(
+            pol.evaluate(&FixAction::DefenderRealtimeEnable, 0.99),
+            Verdict::RequireApproval(_)
+        ));
     }
 }

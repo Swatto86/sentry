@@ -431,6 +431,29 @@ fn actionable_fingerprint(snap: &SignalSnapshot) -> Option<String> {
     if sys.disk_usage_percent > 90.0 {
         parts.push("DISK>90".into());
     }
+    // Security posture — a concrete, fixable exposure makes the cycle actionable.
+    // Only Some(false)/stale counts; unknown (None) and healthy (true) do not, so a
+    // secure machine stays idle and doesn't burn AI calls.
+    let sec = &sys.security;
+    for (name, on) in [
+        ("domain", sec.firewall.domain),
+        ("private", sec.firewall.private),
+        ("public", sec.firewall.public),
+    ] {
+        if on == Some(false) {
+            parts.push(format!("FW|{name}"));
+        }
+    }
+    // Defender faults only matter when Defender is the active AV — if a third-party
+    // AV has taken over (antivirus_enabled == false) its passive state is normal.
+    if sec.defender.antivirus_enabled != Some(false) {
+        if sec.defender.realtime_enabled == Some(false) {
+            parts.push("DEF|realtime_off".into());
+        }
+        if sec.defender.signature_age_days.is_some_and(|d| d > 3) {
+            parts.push("DEF|sig_stale".into());
+        }
+    }
     if parts.is_empty() {
         return None;
     }
@@ -782,6 +805,17 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 pipe.broadcast_status(build_status(&st));
                                 spawn_update_cycle(&cfg, &db, &update_done_tx, &update_progress_tx);
                             }
+                        }
+                        UiMsg::ClearUpdateHistory => {
+                            // Wipe the persisted attempt log and the last cycle's
+                            // in-memory results so the card resets to a clean state.
+                            if let Err(e) = updater::history::clear(&db).await {
+                                warn!("Failed to clear update history: {e}");
+                            }
+                            st.updater.recent.clear();
+                            st.updater.apps.clear();
+                            st.updater.notes.clear();
+                            pipe.broadcast_status(build_status(&st));
                         }
                         UiMsg::UpdateUpdaterSettings(update) => {
                             // Applied live — no service restart (unlike provider settings).

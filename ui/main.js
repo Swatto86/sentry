@@ -462,6 +462,10 @@ document.getElementById('approvals').addEventListener('click', (e) => {
 });
 
 document.getElementById('upd-now').addEventListener('click', updateNow);
+document.getElementById('clear-updates').addEventListener('click', async () => {
+  try { await invoke('clear_update_history'); } catch (e) { console.error('clear_update_history failed', e); }
+  refresh();
+});
 document.getElementById('set-upd-save').addEventListener('click', saveUpdaterSettings);
 
 // Per-app "Ignore" — stop checking this app (delegated from the list).

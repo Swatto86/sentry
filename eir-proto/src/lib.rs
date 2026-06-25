@@ -288,6 +288,9 @@ pub enum UiMsg {
     ClearExecutions,
     /// Run an update cycle now (on demand).
     RunUpdatesNow,
+    /// Clear the app-update output: the last cycle's results and the persisted
+    /// attempt history.
+    ClearUpdateHistory,
     /// Apply updater settings live (no service restart).
     UpdateUpdaterSettings(Box<UpdaterSettingsUpdate>),
     /// Ignore/un-ignore an app, or set a per-app note for the AI.

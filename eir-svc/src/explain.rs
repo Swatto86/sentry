@@ -138,6 +138,30 @@ pub fn explain(action: &FixAction) -> ActionExplanation {
             target: path.clone(),
             reversible: false,
         },
+        FixAction::FirewallEnable { profile } => ActionExplanation {
+            summary: format!(
+                "Turns the Windows Firewall back on for the '{profile}' profile. This restores a \
+                 protective default and can be turned off again."
+            ),
+            target: profile.clone(),
+            reversible: true,
+        },
+        FixAction::DefenderSignatureUpdate => ActionExplanation {
+            summary: "Updates Windows Defender's virus definitions to the latest available. \
+                      Only refreshes definitions — it changes no settings."
+                .to_string(),
+            target: "Windows Defender".to_string(),
+            reversible: true,
+        },
+        FixAction::DefenderRealtimeEnable => ActionExplanation {
+            summary:
+                "Turns Windows Defender real-time (on-access) protection back on. Reversible, \
+                      but only approve this if you did not deliberately disable it (e.g. for a \
+                      different antivirus)."
+                    .to_string(),
+            target: "Windows Defender real-time protection".to_string(),
+            reversible: true,
+        },
     }
 }
 

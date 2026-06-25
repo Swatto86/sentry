@@ -48,6 +48,15 @@ pub async fn record_attempts(
     Ok(())
 }
 
+/// Delete the whole attempt history (the UI's "Clear" on the App Updates card).
+/// Returns the number of rows removed.
+pub async fn clear(pool: &SqlitePool) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM update_attempts")
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 /// The most recent attempts, newest first, for the UI's history view.
 pub async fn recent(pool: &SqlitePool, limit: i64) -> Result<Vec<eir_proto::UpdateAttemptRow>> {
     let rows = sqlx::query(

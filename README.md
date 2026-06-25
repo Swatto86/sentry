@@ -54,7 +54,7 @@ The two talk over a secured local named pipe (`\\.\pipe\EirSvc`).
 Each decision cycle (default every 10 minutes):
 
 1. **Collect signals** — Windows Event Log channels, service states, CPU/memory/disk,
-   network errors, watched log directories.
+   network errors, security posture (firewall & Defender), watched log directories.
 2. **Decide whether to think** — Eir only calls the AI when something *actionable*
    has changed (a fingerprint of the current problems), plus a periodic heartbeat so
    a healthy machine still reports in. Idle cycles are essentially free.
@@ -65,8 +65,8 @@ Each decision cycle (default every 10 minutes):
    is *never* executed; a few catastrophic actions (boot-config edits, driver
    disabling, arbitrary PowerShell) always require approval.
 5. **Execute** — reversible whitelisted fixes (service restart/start/stop, log/disk
-   cleanup, task enable/disable, registry reset, process kill, file delete) run
-   automatically at or above the confidence threshold. Anything disruptive or
+   cleanup, task enable/disable, registry reset, firewall re-enable, Defender
+   signature update) run automatically at or above the confidence threshold. Anything disruptive or
    irreversible is queued for approval in the tray UI — each item explains, in
    plain English, exactly what it will do (and, for a file delete, the file's real
    size, age, and what kind of file it is). The queue is persistent: it never

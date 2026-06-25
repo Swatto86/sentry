@@ -23,10 +23,14 @@ actions = [
     "network_diagnostic",
     # Phase 4 — lower-risk actions auto-approved
     "driver_enable",
-    # Always require approval (disruptive or irreversible — never auto-run):
+    # Phase 5 — security self-healing (safe, reversible: restores a protective default)
+    "firewall_enable",
+    "defender_signature_update",
+    # Always require approval (disruptive, irreversible, or user-sensitive — never auto-run):
     # file_delete (deletes a file, e.g. an app's config), process_kill (can close a
     # foreground app/game), powershell_diagnostic, driver_disable,
-    # software_uninstall (also hard-blocked), bcd_edit
+    # software_uninstall (also hard-blocked), bcd_edit,
+    # defender_realtime_enable (reversible but could conflict with a user's AV choice)
 ]
 
 [blocklist]

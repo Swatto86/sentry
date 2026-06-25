@@ -73,6 +73,13 @@ async fn run_updates_now(tx: State<'_, UiCmdTx>) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn clear_update_history(tx: State<'_, UiCmdTx>) -> Result<(), String> {
+    tx.0.send(UiMsg::ClearUpdateHistory)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_updater_settings(
     settings: UpdaterSettingsUpdate,
     tx: State<'_, UiCmdTx>,
@@ -333,6 +340,7 @@ fn main() {
             clear_problems,
             clear_executions,
             run_updates_now,
+            clear_update_history,
             set_updater_settings,
             set_app_ignore,
             set_advisor_settings,
