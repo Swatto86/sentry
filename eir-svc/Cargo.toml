@@ -46,3 +46,7 @@ tracing-appender = "0.2"
 toml = "0.8"
 tokio-stream = "0.1"
 futures-util = "0.3"
+# Update subsystem: hash staged installers (sha2) and parse/validate installer
+# URLs (url). Both are already used in eir-ui; the update engine now lives here.
+sha2 = "0.10"
+url = "2"

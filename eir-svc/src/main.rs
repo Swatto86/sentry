@@ -9,6 +9,7 @@ mod pipe_server;
 mod policy;
 mod safety;
 mod signals;
+mod updater;
 
 use models::{FixAction, PendingApproval, SignalSnapshot, SystemState};
 use eir_proto::{

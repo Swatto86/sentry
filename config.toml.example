@@ -67,3 +67,50 @@ confidence_threshold = 0.80
 
 [persistence]
 audit_db = "./eir.db"
+
+# ── Autonomous app updater ────────────────────────────────────────────────────
+# Eir can keep your installed apps up to date by itself: it checks for updates,
+# applies them with the best method, and — if one fails — reads the actual error
+# and tries another way (winget -> Chocolatey -> Scoop -> Microsoft Store -> an
+# AI-found official installer). Because the service runs as LocalSystem, this needs
+# NO UAC prompt. Everything here is editable in the app's Settings panel.
+#
+# This whole section is optional: omit it and the defaults below apply (the updater
+# stays OFF until you enable it).
+[updater]
+# Master switch. Off by default — running installers unattended is opt-in.
+enabled = false
+
+# How often an unattended update cycle runs (seconds). 86400 = once a day.
+schedule_interval_secs = 86400
+
+# Package-manager methods to use, in preference order. Unknown names are ignored.
+methods = ["winget", "choco", "scoop", "msstore"]
+
+# Whether AI-found official native installers may be downloaded and run for apps no
+# package manager can update.
+native_enabled = true
+
+# How strictly a downloaded native installer must be signed before it is allowed to
+# run (decided in Rust, never by the AI):
+#   "require_valid"            — must have a valid Authenticode signature (default)
+#   "require_publisher_match"  — valid AND signer matches the expected publisher
+#   "allow_unsigned"           — run regardless of signature (least safe)
+native_signature_policy = "require_valid"
+
+# Safety/cost caps.
+max_attempts_per_app = 3      # methods tried per app before giving up
+max_apps_per_run = 20         # apps acted on per cycle
+budget_usd_per_run = 0.50     # AI spend ceiling per cycle (0 = no explicit ceiling)
+max_installer_mb = 256        # largest native installer to download
+
+# Auto-install a missing package manager (Chocolatey/Scoop) when a method needs it.
+bootstrap_managers = true
+
+# Apps to skip entirely (by stable, version-stripped display name).
+ignored = []
+
+# Per-app hints for the AI, e.g. tell it an app is self-built or where its real
+# releases live. Keyed by the same stable app name.
+# [updater.notes]
+# "my custom tool" = "self-built — never report an update"

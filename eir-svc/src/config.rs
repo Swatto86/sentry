@@ -1,3 +1,4 @@
+use crate::updater::config::UpdaterConfig;
 use anyhow::{Context, Result};
 use eir_proto::{SettingsUpdate, UiSettings};
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,10 @@ pub struct Config {
     pub api: ApiConfig,
     pub monitoring: MonitoringConfig,
     pub persistence: PersistenceConfig,
+    /// Autonomous app-update settings. `#[serde(default)]` so a `config.toml`
+    /// written before the updater existed (no `[updater]` section) still loads.
+    #[serde(default)]
+    pub updater: UpdaterConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, Copy)]
@@ -241,6 +246,26 @@ audit_db = "./eir.db"
         assert_eq!(reparsed.monitoring.event_log_channels.len(), 2);
         // Blank api key keeps the prior value (None here).
         assert!(reparsed.api.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn config_without_updater_section_loads_defaults_and_round_trips() {
+        // SAMPLE has no [updater] section — it must still load (serde default),
+        // and once written back it must reparse identically.
+        use crate::updater::config::SignaturePolicy;
+        let cfg: Config = toml::from_str(SAMPLE).expect("load without [updater]");
+        assert!(!cfg.updater.enabled, "updater is off by default");
+        assert_eq!(
+            cfg.updater.native_signature_policy,
+            SignaturePolicy::RequireValid
+        );
+        assert!(cfg.updater.methods.contains(&"winget".to_string()));
+
+        let serialized = toml::to_string_pretty(&cfg).expect("serialize with [updater]");
+        let reparsed: Config = toml::from_str(&serialized).expect("reparse");
+        assert_eq!(reparsed.updater.enabled, cfg.updater.enabled);
+        assert_eq!(reparsed.updater.methods, cfg.updater.methods);
+        assert_eq!(reparsed.updater.notes, cfg.updater.notes);
     }
 
     #[test]
