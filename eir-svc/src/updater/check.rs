@@ -37,8 +37,9 @@ const SELF_UPDATING: &[&str] = &["discord"];
 /// Strip a Chocolatey package suffix so `discord.install` and `discord` share one
 /// identity (`discord`). Choco splits many apps into `<name>` / `<name>.install` /
 /// `.portable` / `.app` packages; without this they are treated as separate candidates
-/// and a skip/ignore on one misses the others.
-fn base_id(id: &str) -> &str {
+/// and a skip/ignore on one misses the others. `pub(crate)` so the self-improvement
+/// learner keys on the same identity.
+pub(crate) fn base_id(id: &str) -> &str {
     for suffix in [".install", ".portable", ".app", ".commandline"] {
         if let Some(stripped) = id.strip_suffix(suffix) {
             return stripped;
@@ -47,12 +48,13 @@ fn base_id(id: &str) -> &str {
     id
 }
 
-/// Whether a candidate id should be skipped: it's a known self-updater, or the user
-/// has ignored it (either the exact id or its base, so ignoring "discord" also covers
-/// the "discord.install" choco package).
-fn should_skip(cfg: &UpdaterConfig, id: &str) -> bool {
+/// Whether a candidate id should be skipped: the `SELF_UPDATING` seed, a self-updater
+/// the machine has *learned* (`learned`, keyed by base id), or the user's ignore list
+/// (the exact id or its base, so ignoring "discord" also covers "discord.install").
+fn should_skip(cfg: &UpdaterConfig, learned: &HashSet<String>, id: &str) -> bool {
     let base = base_id(id);
     SELF_UPDATING.contains(&base)
+        || learned.contains(base)
         || cfg
             .ignored
             .iter()
@@ -67,6 +69,7 @@ fn push_candidate(
     out: &mut Vec<UpdateCandidate>,
     seen: &mut HashSet<String>,
     cfg: &UpdaterConfig,
+    learned: &HashSet<String>,
     native_avail: bool,
     name: &str,
     current: &str,
@@ -75,7 +78,7 @@ fn push_candidate(
     primary: Method,
 ) {
     let id = clean_app_name(name).to_lowercase();
-    if id.is_empty() || should_skip(cfg, &id) || !seen.insert(id.clone()) {
+    if id.is_empty() || should_skip(cfg, learned, &id) || !seen.insert(id.clone()) {
         return;
     }
     let mut methods = vec![primary];
@@ -99,6 +102,7 @@ pub async fn collect(
     cfg: &UpdaterConfig,
     model_override: &str,
     available: &[Method],
+    learned_skips: &HashSet<String>,
 ) -> CheckResult {
     let native_avail = available.contains(&Method::Native);
     let mut candidates: Vec<UpdateCandidate> = Vec::new();
@@ -115,6 +119,7 @@ pub async fn collect(
                 &mut candidates,
                 &mut seen,
                 cfg,
+                learned_skips,
                 native_avail,
                 &u.name,
                 &u.current,
@@ -131,6 +136,7 @@ pub async fn collect(
                 &mut candidates,
                 &mut seen,
                 cfg,
+                learned_skips,
                 native_avail,
                 &u.name,
                 &u.current,
@@ -147,6 +153,7 @@ pub async fn collect(
                 &mut candidates,
                 &mut seen,
                 cfg,
+                learned_skips,
                 native_avail,
                 &u.name,
                 &u.current,
@@ -163,6 +170,7 @@ pub async fn collect(
                 &mut candidates,
                 &mut seen,
                 cfg,
+                learned_skips,
                 native_avail,
                 &u.name,
                 &u.current,
@@ -176,7 +184,7 @@ pub async fn collect(
     // The AI web-search pass over apps no manager covers -> native candidates.
     if native_avail {
         if let Some(ai) = ai {
-            match check_unmanaged(ai, cfg, model_override, &managed).await {
+            match check_unmanaged(ai, cfg, model_override, &managed, learned_skips).await {
                 Ok((native_cands, c, note)) => {
                     cost += c;
                     if let Some(n) = note {
@@ -219,6 +227,7 @@ async fn check_unmanaged(
     cfg: &UpdaterConfig,
     model_override: &str,
     managed: &HashSet<String>,
+    learned_skips: &HashSet<String>,
 ) -> Result<(Vec<UpdateCandidate>, f64, Option<String>), String> {
     let mut cmd = std::process::Command::new("winget");
     cmd.args([
@@ -229,7 +238,7 @@ async fn check_unmanaged(
     let (_code, list_text) = proc::run_capped_cmd(cmd, LIST).await;
 
     let mut apps = parse_unmanaged(&list_text, managed);
-    apps.retain(|(n, _)| !should_skip(cfg, &n.to_lowercase()));
+    apps.retain(|(n, _)| !should_skip(cfg, learned_skips, &n.to_lowercase()));
     let total = apps.len();
     let mut note = None;
     if apps.len() > AI_CHECK_CAP {
@@ -274,7 +283,7 @@ INSTALLED APPS:\n{app_lines}"
         .iter()
         .map(|(n, v)| (n.to_lowercase(), v.clone()))
         .collect();
-    let candidates = native_candidates_from(&resp.updates, &installed, cfg);
+    let candidates = native_candidates_from(&resp.updates, &installed, cfg, learned_skips);
     Ok((candidates, cost, note))
 }
 
@@ -292,6 +301,7 @@ fn native_candidates_from(
     updates: &[AiUpdateRaw],
     installed: &HashMap<String, String>,
     cfg: &UpdaterConfig,
+    learned_skips: &HashSet<String>,
 ) -> Vec<UpdateCandidate> {
     let mut out = Vec::new();
     for u in updates {
@@ -307,7 +317,7 @@ fn native_candidates_from(
             continue;
         }
         let id = u.name.to_lowercase();
-        if should_skip(cfg, &id) {
+        if should_skip(cfg, learned_skips, &id) {
             continue;
         }
         out.push(UpdateCandidate {
@@ -336,11 +346,23 @@ mod tests {
     #[test]
     fn self_updaters_are_skipped_across_choco_variants() {
         let cfg = UpdaterConfig::default();
+        let none = HashSet::new();
         // Both the plain and the .install choco package map to "discord" and skip.
-        assert!(should_skip(&cfg, "discord"));
-        assert!(should_skip(&cfg, "discord.install"));
+        assert!(should_skip(&cfg, &none, "discord"));
+        assert!(should_skip(&cfg, &none, "discord.install"));
         // An unrelated app is not skipped.
-        assert!(!should_skip(&cfg, "vscode.install"));
+        assert!(!should_skip(&cfg, &none, "vscode.install"));
+    }
+
+    #[test]
+    fn learned_self_updater_is_skipped_across_variants() {
+        let cfg = UpdaterConfig::default();
+        // A self-updater Eir learned at runtime (keyed by base id) is skipped — including
+        // its choco .install variant — even though it isn't in the SELF_UPDATING seed.
+        let learned: HashSet<String> = ["spotify".to_string()].into_iter().collect();
+        assert!(should_skip(&cfg, &learned, "spotify"));
+        assert!(should_skip(&cfg, &learned, "spotify.install"));
+        assert!(!should_skip(&cfg, &learned, "vscode"));
     }
 
     #[test]
@@ -349,10 +371,11 @@ mod tests {
             ignored: vec!["winscp".to_string()],
             ..UpdaterConfig::default()
         };
+        let none = HashSet::new();
         // Ignoring the base name also covers the ".install" choco variant.
-        assert!(should_skip(&cfg, "winscp"));
-        assert!(should_skip(&cfg, "winscp.install"));
-        assert!(!should_skip(&cfg, "vscode"));
+        assert!(should_skip(&cfg, &none, "winscp"));
+        assert!(should_skip(&cfg, &none, "winscp.install"));
+        assert!(!should_skip(&cfg, &none, "vscode"));
     }
 
     #[test]
@@ -384,7 +407,7 @@ mod tests {
             upd("Empty", ""),         // no latest -> dropped
             upd("GhostApp", "9.0"),   // NOT installed (AI fabrication) -> dropped
         ];
-        let cands = native_candidates_from(&updates, &installed, &cfg);
+        let cands = native_candidates_from(&updates, &installed, &cfg, &HashSet::new());
         let names: Vec<&str> = cands.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["Obsidian"]);
         // The kept candidate carries the authoritative installed version + target.

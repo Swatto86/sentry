@@ -7,7 +7,7 @@
 
 # Eir — Architecture & Design
 
-**Last updated:** 2026-06-25 · **Release:** v0.11.3
+**Last updated:** 2026-06-25 · **Release:** v0.12.0
 
 Eir is an autonomous Windows system-repair agent: it watches a machine's health,
 uses an AI model to diagnose problems, and applies least-destructive fixes —
@@ -37,7 +37,8 @@ with a confidence and a proposed `FixAction` → policy gates each (auto-execute
 require-approval / block) → reversible whitelisted fixes at/above the confidence
 threshold run on an **off-loop executor worker**; disruptive/irreversible ones queue
 for approval. Every decision, execution, approval, and update attempt is persisted to
-the audit DB — which is the substrate the planned self-improvement layer learns from.
+the audit DB — which is the substrate the self-improvement layer learns from (Phase 1
+shipped; see [Self-improvement](#self-improvement-machine-pattern-learning)).
 
 ## Table of contents
 
@@ -49,7 +50,7 @@ the audit DB — which is the substrate the planned self-improvement layer learn
 - [Executor, policy, safety & explanations](#executor-policy-safety--explanations)
 - [Autonomous app updater](#autonomous-app-updater)
 - [Persistence, audit DB & the existing feedback loop](#persistence-audit-db--the-existing-feedback-loop)
-- [Self-improvement: machine-pattern learning (design & phased plan)](#self-improvement-machine-pattern-learning-planned)
+- [Self-improvement: machine-pattern learning](#self-improvement-machine-pattern-learning)
 - [Known limitations & backlog](#known-limitations--backlog)
 
 ---
@@ -715,13 +716,15 @@ So the entire closed loop is: execute → record before → next-cycle record af
 
 ---
 
-## Self-improvement: machine-pattern learning (PLANNED)
+## Self-improvement: machine-pattern learning
 
-> **Status: designed, not yet implemented.** This section is the design of record for
-> making Eir adapt to the specific machine it runs on instead of relying on hardcoded
-> rules. The motivating case is that Eir should *discover* that an app like Discord is a
-> self-updater whose package-manager update keeps timing out and stop fighting it —
-> today that is the hardcoded `SELF_UPDATING = ["discord"]` seed in `updater/check.rs`.
+> **Status: Phase 1 shipped (v0.12.0); Phases 2–5 planned.** Eir adapts to the specific
+> machine it runs on instead of relying only on hardcoded rules. The motivating case —
+> Eir *discovering* that an app like Discord is a self-updater whose package-manager
+> update keeps timing out, and stopping fighting it — is now **learned** from the audit
+> history (`learn/`), not just the hardcoded `SELF_UPDATING` seed in `updater/check.rs`.
+> The seed remains as a cold-start default. The rest of this section is the design of
+> record; per-phase status is marked in the phased plan below.
 
 ### Principle
 
@@ -835,11 +838,19 @@ behaviour change is the trust risk, and the card is the answer.
 
 ### Phased plan
 
-1. **Phase 1 — Learn the Discord case (subsume the hardcode).** `migration 0008`
-   (`learned_facts`), `learn/` module (`SelfUpdaterSuspected` + `Effect::Skip` only),
-   the timeout-quorum detector, `should_skip` ORs in the learned lookup beside the kept
-   seed. Pure detector case-tables + an integration test pinning the `TIMED_OUT`
-   contract. *Risk: low (skip-only, guarded by "no success in window" + decay).*
+1. **Phase 1 — Learn the Discord case (subsume the hardcode). ✅ Shipped (v0.12.0).**
+   `migration 0008` (`learned_facts`), `learn/` module (`SelfUpdaterSuspected` +
+   `Effect::Skip`), the timeout-quorum detector, `should_skip` ORs in the learned lookup
+   beside the kept seed. `analyse()` runs at the end of the updater cycle. Refinements
+   from the adversarial review folded in: the timeout signal requires `category ==
+   network_transient` so the native tamper-abort `-4` (`hash_mismatch`) is **not**
+   mislabelled a self-updater; an **evidence-window re-probe** (`expire_unsupported_…`)
+   expires a fact once its timeouts age out of the window, so a slow/large-app false
+   positive self-corrects rather than skipping forever; and the App Updates **Clear**
+   resets detector-learned facts (user pin/disable preserved). *Known limitation: a
+   genuinely too-large/too-slow install (legitimately exceeding the 600s cap) reads the
+   same as a self-updater hang; it is periodically re-probed and clearable, and Phase 2's
+   finer signals refine it.*
 2. **Phase 2 — Method preference + decay/re-probe.** `MethodFailing` →
    `DeprioritiseMethod` in `heal()` (reorder, never remove); decay floor → expiry;
    re-probe cadence.

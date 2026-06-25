@@ -4,6 +4,7 @@ mod config;
 mod executor;
 mod explain;
 mod feedback;
+mod learn;
 mod models;
 mod pipe_server;
 mod policy;
@@ -901,6 +902,13 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             // in-memory results so the card resets to a clean state.
                             if let Err(e) = updater::history::clear(&db).await {
                                 warn!("Failed to clear update history: {e}");
+                            }
+                            // Also reset detector-learned facts: they are derived purely
+                            // from the attempt log just cleared, so leaving them would keep
+                            // skipping apps with no remaining evidence. User pinned/disabled
+                            // facts are preserved by clear_detector_facts.
+                            if let Err(e) = learn::clear_detector_facts(&db).await {
+                                warn!("Failed to clear learned facts: {e}");
                             }
                             st.updater.recent.clear();
                             st.updater.apps.clear();

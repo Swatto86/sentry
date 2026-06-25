@@ -308,7 +308,19 @@ pub async fn run_cycle(
 ) -> CycleSummary {
     let _ = progress.send("checking…".to_string()).await;
     let available = available_methods(ctx.config, ctx.ai).await;
-    let check = check::collect(ctx.ai, ctx.config, ctx.model_override, &available).await;
+    // Self-updaters Eir has learned to leave alone (e.g. an app whose package-manager
+    // update keeps timing out) are skipped during candidate collection — see learn::.
+    let learned_skips = crate::learn::active_self_updater_subjects(pool)
+        .await
+        .unwrap_or_default();
+    let check = check::collect(
+        ctx.ai,
+        ctx.config,
+        ctx.model_override,
+        &available,
+        &learned_skips,
+    )
+    .await;
     let budget = ctx.config.budget_usd_per_run;
     let mut spent = check.cost_usd;
     let mut notes = check.notes;
@@ -339,6 +351,11 @@ pub async fn run_cycle(
         }
         results.push((cand, outcomes));
     }
+
+    // Learn from this cycle's (and recent) attempts: e.g. an app that keeps timing out
+    // and never succeeds is a self-updater to stop fighting next cycle. Best-effort,
+    // runs on already-collected data — no extra external I/O, no AI.
+    crate::learn::analyse(pool).await;
 
     CycleSummary {
         results,
