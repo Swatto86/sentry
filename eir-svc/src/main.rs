@@ -185,7 +185,10 @@ struct SvcState {
     advisor: Option<AdvisorStatus>,
     /// Escalation AI spend accumulated today (reset at the UTC day boundary).
     advisor_spent_today: f64,
-    /// The UTC date (YYYY-MM-DD) that `advisor_spent_today` belongs to.
+    /// Escalations performed today — a provider-agnostic backstop, since the USD
+    /// budget can't bound providers that report no cost.
+    advisor_escalations_today: u32,
+    /// The UTC date (YYYY-MM-DD) that the advisor day-counters belong to.
     advisor_spend_date: String,
 }
 
@@ -209,6 +212,7 @@ impl Default for SvcState {
             updater_running: false,
             advisor: None,
             advisor_spent_today: 0.0,
+            advisor_escalations_today: 0,
             advisor_spend_date: String::new(),
         }
     }
@@ -249,20 +253,30 @@ fn build_status(st: &SvcState) -> StatusPayload {
     }
 }
 
+/// Hard backstop on escalations per UTC day. The USD budget can only bound providers
+/// that report cost (OpenRouter, and the Claude CLI when it does); for the Anthropic
+/// native and OpenAI-compatible providers — which return no usage — this count is the
+/// only ceiling. Always applied so the cap holds regardless of provider.
+const MAX_ESCALATIONS_PER_DAY: u32 = 24;
+
 /// Decide whether the advisor should re-analyse at a higher tier, and why. Pure.
 /// Returns `Some(reason)` to escalate. Bounded: it fires only when advisor mode is on,
-/// a deeper tier is configured, the day's escalation budget isn't spent, AND the agent
-/// flagged ambiguity or the best reported confidence is below the threshold.
+/// a deeper tier is configured, neither the per-day count cap nor the USD budget is
+/// spent, AND the agent flagged ambiguity or the best confidence is below the threshold.
 fn should_escalate(
     decision: &models::ClaudeDecision,
     cfg: &config::AdvisorConfig,
     spent_today: f64,
+    escalations_today: u32,
 ) -> Option<&'static str> {
     if !cfg.enabled {
         return None;
     }
     // A deeper pass needs at least one lever (a stronger model or a higher effort).
     if cfg.escalation_model.trim().is_empty() && cfg.escalation_effort.trim().is_empty() {
+        return None;
+    }
+    if escalations_today >= MAX_ESCALATIONS_PER_DAY {
         return None;
     }
     if cfg.budget_usd_per_day > 0.0 && spent_today >= cfg.budget_usd_per_day {
@@ -951,6 +965,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                     if st.advisor_spend_date != today {
                         st.advisor_spend_date = today;
                         st.advisor_spent_today = 0.0;
+                        st.advisor_escalations_today = 0;
                     }
                     let mut adv = AdvisorStatus {
                         enabled: cfg.advisor.enabled,
@@ -960,10 +975,16 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         spent_today_usd: st.advisor_spent_today,
                         settings: cfg.advisor.to_view(),
                     };
-                    if let Some(reason) =
-                        should_escalate(&claude_decision, &cfg.advisor, st.advisor_spent_today)
-                    {
+                    if let Some(reason) = should_escalate(
+                        &claude_decision,
+                        &cfg.advisor,
+                        st.advisor_spent_today,
+                        st.advisor_escalations_today,
+                    ) {
                         info!(reason, "Advisor escalating to a deeper analysis pass");
+                        // Count the attempt (even if it fails) so a failing escalation
+                        // can't retry every cycle and defeat the cap.
+                        st.advisor_escalations_today += 1;
                         match ai
                             .analyze_with(
                                 &snapshot,
@@ -1231,25 +1252,34 @@ mod advisor_tests {
     #[test]
     fn escalates_on_ai_flag_and_low_confidence_only_when_enabled() {
         // Disabled -> never.
-        assert!(should_escalate(&decision(true, &[]), &cfg(false), 0.0).is_none());
+        assert!(should_escalate(&decision(true, &[]), &cfg(false), 0.0, 0).is_none());
         // AI flag -> escalate.
-        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.0).is_some());
+        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.0, 0).is_some());
         // Low-confidence reported problem -> escalate.
-        assert!(should_escalate(&decision(false, &[0.4]), &cfg(true), 0.0).is_some());
+        assert!(should_escalate(&decision(false, &[0.4]), &cfg(true), 0.0, 0).is_some());
         // Confident, no flag -> don't.
-        assert!(should_escalate(&decision(false, &[0.95]), &cfg(true), 0.0).is_none());
+        assert!(should_escalate(&decision(false, &[0.95]), &cfg(true), 0.0, 0).is_none());
         // Healthy (no problems, no flag) -> don't.
-        assert!(should_escalate(&decision(false, &[]), &cfg(true), 0.0).is_none());
+        assert!(should_escalate(&decision(false, &[]), &cfg(true), 0.0, 0).is_none());
     }
 
     #[test]
-    fn budget_and_missing_tier_block_escalation() {
-        // Over the daily budget -> don't, even with the AI flag.
-        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.50).is_none());
+    fn budget_count_and_missing_tier_block_escalation() {
+        // Over the daily USD budget -> don't, even with the AI flag.
+        assert!(should_escalate(&decision(true, &[]), &cfg(true), 0.50, 0).is_none());
+        // At the per-day escalation COUNT cap -> don't (the provider-agnostic backstop,
+        // even though spend is 0, e.g. a provider that reports no cost).
+        assert!(should_escalate(
+            &decision(true, &[]),
+            &cfg(true),
+            0.0,
+            MAX_ESCALATIONS_PER_DAY
+        )
+        .is_none());
         // No escalation tier configured -> don't.
         let mut no_tier = cfg(true);
         no_tier.escalation_model = String::new();
         no_tier.escalation_effort = String::new();
-        assert!(should_escalate(&decision(true, &[]), &no_tier, 0.0).is_none());
+        assert!(should_escalate(&decision(true, &[]), &no_tier, 0.0, 0).is_none());
     }
 }
