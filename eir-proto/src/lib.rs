@@ -31,6 +31,25 @@ pub struct StatusPayload {
     /// for backward-compatible decode.
     #[serde(default)]
     pub advisor: Option<AdvisorStatus>,
+    /// What Eir has learned about this machine (self-improvement), for the UI's
+    /// transparency card. `#[serde(default)]` keeps an older payload decodable.
+    #[serde(default)]
+    pub learned_facts: Vec<LearnedFactView>,
+}
+
+/// One learned fact, rendered in the UI's "What Eir has learned" card.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct LearnedFactView {
+    /// `learned_facts.id` — the key for Pin / Disable / Forget.
+    pub id: i64,
+    /// Plain-English summary of what was learned and its effect.
+    pub summary: String,
+    /// The supporting evidence ("3 timed-out cycles, 0 successes in 30d").
+    pub detail: String,
+    /// active | expired | user_pinned | user_disabled.
+    pub status: String,
+    /// detector | ai_labelled.
+    pub source: String,
 }
 
 /// Advisor-mode status: whether the last analysis escalated to deeper reasoning, and
@@ -291,6 +310,12 @@ pub enum UiMsg {
     /// Clear the app-update output: the last cycle's results and the persisted
     /// attempt history.
     ClearUpdateHistory,
+    /// Override a learned fact: op is "pin" (keep), "disable" (ignore), or "forget"
+    /// (delete). User overrides always win over the detector.
+    SetLearnedFact {
+        id: i64,
+        op: String,
+    },
     /// Apply updater settings live (no service restart).
     UpdateUpdaterSettings(Box<UpdaterSettingsUpdate>),
     /// Ignore/un-ignore an app, or set a per-app note for the AI.

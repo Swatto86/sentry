@@ -7,7 +7,7 @@
 
 # Eir — Architecture & Design
 
-**Last updated:** 2026-06-25 · **Release:** v0.13.0
+**Last updated:** 2026-06-25 · **Release:** v0.14.0
 
 Eir is an autonomous Windows system-repair agent: it watches a machine's health,
 uses an AI model to diagnose problems, and applies least-destructive fixes —
@@ -718,7 +718,7 @@ So the entire closed loop is: execute → record before → next-cycle record af
 
 ## Self-improvement: machine-pattern learning
 
-> **Status: Phases 1–3 shipped (v0.13.0); Phases 4–5 planned.** Eir adapts to the specific
+> **Status: Phases 1–4 shipped (v0.14.0); Phase 5 (optional AI labeller) planned.** Eir adapts to the specific
 > machine it runs on instead of relying only on hardcoded rules: it learns self-updaters,
 > failing update methods, ineffective service fixes, and actions the user keeps rejecting,
 > and applies them at the updater's method order and the issue-analysis confidence gate —
@@ -868,8 +868,11 @@ behaviour change is the trust risk, and the card is the answer.
    prompt (base + advisor-escalation), with the security carve-out applied to the prompt
    too. `analyse_issues()` runs each decision cycle. *`RecurringFingerprint` deferred —
    overlaps `FixIneffective` and needs per-decision fingerprint identity.*
-4. **Phase 4 — UI transparency + user override.** `LearnedFactView` + Pin/Disable/Forget,
-   the "What Eir has learned" card, precedence enforcement.
+4. **Phase 4 — UI transparency + user override. ✅ Shipped (v0.14.0).** `LearnedFactView`
+   in the status broadcast; a "What Eir Has Learned" tray card listing each fact with its
+   evidence and **Pin / Disable / Forget** (`UiMsg::SetLearnedFact`); precedence enforced
+   in the store (`user_disabled`/`user_pinned` survive reinforcement and the
+   evidence-window reconcile; a disabled self-updater fact stops being applied).
 5. **Phase 5 (optional) — AI labeller (Tier 2).** Bounded AI explanation / narrower
    scope under the advisor budget; strict re-validation discards any widening/kind-change.
 

@@ -13,8 +13,8 @@ mod signals;
 mod updater;
 
 use eir_proto::{
-    AdvisorStatus, ApprovalInfo, ExecutionSummary, ProblemSummary, StatusPayload, UiMsg,
-    UiSettings, UpdaterStatus, UsageSummary,
+    AdvisorStatus, ApprovalInfo, ExecutionSummary, LearnedFactView, ProblemSummary, StatusPayload,
+    UiMsg, UiSettings, UpdaterStatus, UsageSummary,
 };
 use models::{ExecutionResult, FixAction, PendingApproval, SignalSnapshot, SystemState};
 use sqlx::SqlitePool;
@@ -186,6 +186,8 @@ struct SvcState {
     /// worker. Used to dedupe duplicate enqueues and to reflect "Executing" status
     /// while any action runs off the decision loop.
     in_flight: HashSet<String>,
+    /// What Eir has learned about this machine (self-improvement), for the UI card.
+    learned_facts: Vec<LearnedFactView>,
     /// Advisor-mode status broadcast to the UI.
     advisor: Option<AdvisorStatus>,
     /// Escalation AI spend accumulated today (reset at the UTC day boundary).
@@ -216,6 +218,7 @@ impl Default for SvcState {
             updater: UpdaterStatus::default(),
             updater_running: false,
             in_flight: HashSet::new(),
+            learned_facts: Vec::new(),
             advisor: None,
             advisor_spent_today: 0.0,
             advisor_escalations_today: 0,
@@ -256,6 +259,7 @@ fn build_status(st: &SvcState) -> StatusPayload {
         settings: st.settings.clone(),
         updater: Some(st.updater.clone()),
         advisor: st.advisor.clone(),
+        learned_facts: st.learned_facts.clone(),
     }
 }
 
@@ -920,6 +924,14 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                             st.updater.recent.clear();
                             st.updater.apps.clear();
                             st.updater.notes.clear();
+                            st.learned_facts = learn::facts_for_view(&db).await.unwrap_or_default();
+                            pipe.broadcast_status(build_status(&st));
+                        }
+                        UiMsg::SetLearnedFact { id, op } => {
+                            if let Err(e) = learn::set_learned_fact(&db, id, &op).await {
+                                warn!("Failed to set learned fact {id} ({op}): {e}");
+                            }
+                            st.learned_facts = learn::facts_for_view(&db).await.unwrap_or_default();
                             pipe.broadcast_status(build_status(&st));
                         }
                         UiMsg::UpdateUpdaterSettings(update) => {
@@ -1078,6 +1090,12 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                 }
                 let feedback_summary =
                     feedback::recent_summary(&db, 10).await.unwrap_or_default();
+
+                // Refresh the "what Eir has learned" card every cycle (incl. idle ones) so
+                // it reflects facts formed by both the decision loop and the updater.
+                if let Ok(facts) = learn::facts_for_view(&db).await {
+                    st.learned_facts = facts;
+                }
 
                 // ── Decide whether to call the AI ─────────────────────────────
                 // Skip benign/unchanged idle cycles to save usage — but always run

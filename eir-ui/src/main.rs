@@ -102,6 +102,13 @@ async fn set_app_ignore(
 }
 
 #[tauri::command]
+async fn set_learned_fact(id: i64, op: String, tx: State<'_, UiCmdTx>) -> Result<(), String> {
+    tx.0.send(UiMsg::SetLearnedFact { id, op })
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn set_advisor_settings(
     settings: AdvisorSettingsUpdate,
     tx: State<'_, UiCmdTx>,
@@ -343,6 +350,7 @@ fn main() {
             clear_update_history,
             set_updater_settings,
             set_app_ignore,
+            set_learned_fact,
             set_advisor_settings,
             util::gbp_per_usd,
             util::open_url

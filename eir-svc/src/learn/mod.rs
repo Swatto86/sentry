@@ -16,7 +16,10 @@ mod detect;
 mod store;
 
 pub use apply::LearnedFacts;
-pub use store::{active_self_updater_subjects, clear_detector_facts, record_rejection};
+pub use store::{
+    active_self_updater_subjects, clear_detector_facts, facts_for_view, record_rejection,
+    set_learned_fact,
+};
 
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;

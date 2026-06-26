@@ -257,6 +257,9 @@ async function refresh() {
   // App updates (service-driven).
   renderUpdater(status.updater);
 
+  // What Eir has learned about this machine (self-improvement).
+  renderLearned(status.learned_facts);
+
   if (status.error && /settings|not applied/i.test(status.error)) {
     const ss = document.getElementById('set-status');
     if (ss) ss.textContent = status.error;
@@ -414,6 +417,34 @@ async function updateNow() {
   catch (e) { console.error('run_updates_now failed', e); }
 }
 
+// ── What Eir has learned about this machine (self-improvement) ────────────────
+
+const LEARNED_BADGE = {
+  user_pinned:   '<span class="upd-badge tag-ok">Pinned</span>',
+  user_disabled: '<span class="upd-badge tag-block">Disabled</span>',
+  expired:       '<span class="upd-badge tag-warn">Lapsed</span>',
+};
+
+function learnedRow(f) {
+  const badge = LEARNED_BADGE[f.status] || '';
+  const dim = (f.status === 'user_disabled' || f.status === 'expired') ? ' style="opacity:.55"' : '';
+  const ai = f.source === 'ai_labelled' ? '<span class="upd-status">AI</span>' : '';
+  return `<div class="upd-row"${dim} data-id="${f.id}">
+    <span class="upd-name" title="${escAttr(f.detail)}">${esc(f.summary)}</span>${ai}${badge}
+    <button class="upd-mini learned-act" data-id="${f.id}" data-op="pin"     title="Always keep this">Pin</button>
+    <button class="upd-mini learned-act" data-id="${f.id}" data-op="disable" title="Ignore this learned fact">Disable</button>
+    <button class="upd-mini learned-act" data-id="${f.id}" data-op="forget"  title="Delete (re-learns if it recurs)">Forget</button>
+  </div>`;
+}
+
+function renderLearned(facts) {
+  const card = document.getElementById('learned-card');
+  const list = document.getElementById('learned-list');
+  if (!facts || facts.length === 0) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  list.innerHTML = facts.map(learnedRow).join('');
+}
+
 // ── Updater settings (apply live — no service restart) ───────────────────────
 
 const METHOD_BOXES = [['m-winget', 'winget'], ['m-choco', 'choco'], ['m-scoop', 'scoop'], ['m-msstore', 'msstore']];
@@ -475,6 +506,17 @@ document.getElementById('updater-apps').addEventListener('click', (e) => {
   invoke('set_app_ignore', { id: ig.dataset.id, ignore: true, note: '' })
     .then(() => { const row = ig.closest('.upd-row'); if (row) row.style.opacity = '.5'; })
     .catch(err => console.error('set_app_ignore failed', err));
+});
+
+// Pin / Disable / Forget a learned fact (delegated from the list).
+document.getElementById('learned-list').addEventListener('click', (e) => {
+  const btn = e.target.closest('.learned-act');
+  if (!btn) return;
+  const id = parseInt(btn.dataset.id, 10);
+  if (!Number.isFinite(id)) return;
+  invoke('set_learned_fact', { id, op: btn.dataset.op })
+    .then(refresh)
+    .catch(err => console.error('set_learned_fact failed', err));
 });
 
 // ── Settings ────────────────────────────────────────────────────────────────

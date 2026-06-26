@@ -203,6 +203,78 @@ pub async fn active_facts(pool: &SqlitePool) -> Result<Vec<FactRow>> {
     Ok(out)
 }
 
+/// Build the plain-English summary for the UI card from a fact's kind + subject.
+fn view_summary(kind: &str, subject: &str) -> String {
+    match super::LearnedFactKind::from_token(kind) {
+        Some(super::LearnedFactKind::SelfUpdaterSuspected) => {
+            format!("Not managing updates for '{subject}' — it self-updates / keeps timing out")
+        }
+        Some(super::LearnedFactKind::MethodFailing) => {
+            let (app, method) = subject
+                .split_once(super::SUBJECT_SEP)
+                .unwrap_or((subject, "?"));
+            format!("Updating '{app}': trying '{method}' last (it keeps failing here)")
+        }
+        Some(super::LearnedFactKind::FixIneffective) => {
+            format!("Lower confidence in '{subject}' fixes — they never resolve the fault here")
+        }
+        Some(super::LearnedFactKind::RejectedSignal) => {
+            format!("Proposing '{subject}' less readily — you keep rejecting it")
+        }
+        None => format!("{kind}: {subject}"),
+    }
+}
+
+/// Every learned fact (all statuses), newest first, for the UI transparency card.
+pub async fn facts_for_view(pool: &SqlitePool) -> Result<Vec<eir_proto::LearnedFactView>> {
+    let rows = sqlx::query(
+        "SELECT id, kind, subject, evidence_json, status, source FROM learned_facts \
+         ORDER BY (status = 'user_disabled'), (status = 'expired'), last_reinforced_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let kind: String = r.try_get("kind")?;
+        let subject: String = r.try_get("subject")?;
+        out.push(eir_proto::LearnedFactView {
+            id: r.try_get("id")?,
+            summary: view_summary(&kind, &subject),
+            detail: r.try_get("evidence_json").unwrap_or_default(),
+            status: r.try_get("status")?,
+            source: r.try_get("source")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Apply a user override to a learned fact by id: "pin" (always keep), "disable"
+/// (always ignore), or "forget" (delete the row).
+pub async fn set_learned_fact(pool: &SqlitePool, id: i64, op: &str) -> Result<()> {
+    match op {
+        "forget" => {
+            sqlx::query("DELETE FROM learned_facts WHERE id = ?")
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+        "pin" | "disable" => {
+            let status = if op == "pin" {
+                "user_pinned"
+            } else {
+                "user_disabled"
+            };
+            sqlx::query("UPDATE learned_facts SET status = ? WHERE id = ?")
+                .bind(status)
+                .bind(id)
+                .execute(pool)
+                .await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Just the self-updater subjects in force — the updater's candidate filter consults this.
 pub async fn active_self_updater_subjects(pool: &SqlitePool) -> Result<HashSet<String>> {
     let rows = sqlx::query(
