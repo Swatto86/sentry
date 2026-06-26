@@ -865,6 +865,13 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                     }
                                 } else {
                                     info!(id, diagnosis = %pa.info.diagnosis, "UI-rejected");
+                                    // Record the rejection so self-improvement can learn to
+                                    // stop proposing an action the user keeps refusing.
+                                    if let Err(e) =
+                                        learn::record_rejection(&db, pa.decision_id, &pa.info.action).await
+                                    {
+                                        warn!("Failed to record rejection: {e}");
+                                    }
                                     push_problem(
                                         &mut st,
                                         &pa.info.diagnosis,
@@ -1095,9 +1102,20 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                     continue;
                 }
 
+                // ── Self-improvement: learn issue-side patterns, then apply them ──
+                // Derive ineffective-fix / rejected-action facts from history, then load
+                // the in-force facts so issue analysis reasons with them (prompt) and the
+                // confidence gate accounts for them (per-problem routing below).
+                learn::analyse_issues(&db).await;
+                let learned_facts = learn::LearnedFacts::load(&db).await;
+                let learned_section = learned_facts.prompt_section();
+
                 // ── Claude analysis ──────────────────────────────────────────
                 let mut claude_decision =
-                    match ai.analyze(&snapshot, &history, Some(&feedback_summary)).await {
+                    match ai
+                        .analyze(&snapshot, &history, Some(&feedback_summary), learned_section.as_deref())
+                        .await
+                    {
                         Ok((d, usage)) => {
                             if let Some(u) = usage {
                                 if let Err(e) = audit::log_usage(&db, &u).await {
@@ -1158,6 +1176,7 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                                 &snapshot,
                                 &history,
                                 Some(&feedback_summary),
+                                learned_section.as_deref(),
                                 Some(cfg.advisor.escalation_model.as_str()),
                                 Some(cfg.advisor.escalation_effort.as_str()),
                             )
@@ -1235,7 +1254,15 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         continue;
                     };
 
-                    match pol.evaluate(&action, problem.confidence) {
+                    // Self-improvement: shave a capped amount off confidence for an action
+                    // the machine has learned is ineffective or that the user keeps
+                    // rejecting, so the EXISTING policy gate accounts for it. Never lowers a
+                    // security action (see apply::confidence_penalty).
+                    let action_label = format!("{action:?}");
+                    let confidence =
+                        (problem.confidence - learned_facts.confidence_penalty(&action_label)).max(0.0);
+
+                    match pol.evaluate(&action, confidence) {
                         policy::Verdict::Block(reason) => {
                             info!(reason = %reason, "Blocked by policy");
                             push_problem(

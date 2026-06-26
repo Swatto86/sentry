@@ -4,7 +4,11 @@ pub fn build(
     snapshot: &SignalSnapshot,
     history: &[PastDecision],
     feedback_summary: Option<&str>,
+    learned: Option<&str>,
 ) -> String {
+    // What Eir has learned about this machine (self-improvement) — read-only context so
+    // the diagnostician reasons with the same knowledge that gates the actions.
+    let learned_section = learned.unwrap_or("");
     let mut snapshot_value = serde_json::to_value(snapshot).unwrap_or_default();
     if let Some(obj) = snapshot_value.as_object_mut() {
         obj.remove("decision_history");
@@ -34,7 +38,7 @@ CURRENT SYSTEM STATE (full snapshot):
 
 RECENT DECISION HISTORY (last 5):
 {history_json}
-{feedback_section}
+{feedback_section}{learned_section}
 AVAILABLE FIX ACTIONS (use the exact action key and fields shown):
   service_restart / service_stop / service_start: {{"action": "...", "service_name": "..."}}
   log_cleanup:           {{"action": "log_cleanup", "path": "C:\\Logs\\App", "days_old": 7}}
@@ -188,6 +192,7 @@ Respond ONLY with valid JSON (no markdown, no preamble):
         snapshot_json = snapshot_json,
         history_json = history_json,
         feedback_section = feedback_section,
+        learned_section = learned_section,
     )
 }
 

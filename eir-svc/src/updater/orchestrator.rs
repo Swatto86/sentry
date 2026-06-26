@@ -136,13 +136,19 @@ pub async fn heal(
     ctx: &EngineCtx<'_>,
     available: &[Method],
     budget_remaining: f64,
+    learned: &crate::learn::LearnedFacts,
 ) -> Vec<AttemptOutcome> {
-    let order: Vec<Method> = candidate
+    let mut order: Vec<Method> = candidate
         .methods
         .iter()
         .copied()
         .filter(|m| available.contains(m))
         .collect();
+    // A method the machine has learned keeps failing for this app is pushed to the back
+    // (still a fallback, never removed). Stable sort preserves the configured order
+    // within each group; `false` (not deprioritised) sorts before `true`.
+    let app_base = crate::updater::check::base_id(&candidate.id);
+    order.sort_by_key(|m| learned.is_method_deprioritised(app_base, m.as_str()));
     let max = (ctx.config.max_attempts_per_app as usize).max(1);
     let mut attempts: Vec<AttemptOutcome> = Vec::new();
     let mut tried: Vec<Method> = Vec::new();
@@ -313,6 +319,7 @@ pub async fn run_cycle(
     let learned_skips = crate::learn::active_self_updater_subjects(pool)
         .await
         .unwrap_or_default();
+    let learned = crate::learn::LearnedFacts::load(pool).await;
     let check = check::collect(
         ctx.ai,
         ctx.config,
@@ -344,7 +351,7 @@ pub async fn run_cycle(
             f64::INFINITY
         };
         let _ = progress.send(format!("updating {}…", cand.name)).await;
-        let outcomes = heal(&cand, ctx, &available, remaining).await;
+        let outcomes = heal(&cand, ctx, &available, remaining, &learned).await;
         spent += outcomes.iter().map(|o| o.cost_usd).sum::<f64>();
         if let Err(e) = history::record_attempts(pool, cycle_id, &cand, &outcomes).await {
             warn!("failed to record update history for {}: {e}", cand.name);
@@ -352,10 +359,10 @@ pub async fn run_cycle(
         results.push((cand, outcomes));
     }
 
-    // Learn from this cycle's (and recent) attempts: e.g. an app that keeps timing out
-    // and never succeeds is a self-updater to stop fighting next cycle. Best-effort,
-    // runs on already-collected data — no extra external I/O, no AI.
-    crate::learn::analyse(pool).await;
+    // Learn from this cycle's (and recent) attempts: an app that keeps timing out with no
+    // success is a self-updater to stop fighting; a method that keeps failing while another
+    // works is deprioritised. Best-effort, on already-collected data — no AI, no extra I/O.
+    crate::learn::analyse_updates(pool).await;
 
     CycleSummary {
         results,

@@ -7,7 +7,7 @@
 
 # Eir — Architecture & Design
 
-**Last updated:** 2026-06-25 · **Release:** v0.12.0
+**Last updated:** 2026-06-25 · **Release:** v0.13.0
 
 Eir is an autonomous Windows system-repair agent: it watches a machine's health,
 uses an AI model to diagnose problems, and applies least-destructive fixes —
@@ -718,13 +718,16 @@ So the entire closed loop is: execute → record before → next-cycle record af
 
 ## Self-improvement: machine-pattern learning
 
-> **Status: Phase 1 shipped (v0.12.0); Phases 2–5 planned.** Eir adapts to the specific
-> machine it runs on instead of relying only on hardcoded rules. The motivating case —
-> Eir *discovering* that an app like Discord is a self-updater whose package-manager
-> update keeps timing out, and stopping fighting it — is now **learned** from the audit
-> history (`learn/`), not just the hardcoded `SELF_UPDATING` seed in `updater/check.rs`.
-> The seed remains as a cold-start default. The rest of this section is the design of
-> record; per-phase status is marked in the phased plan below.
+> **Status: Phases 1–3 shipped (v0.13.0); Phases 4–5 planned.** Eir adapts to the specific
+> machine it runs on instead of relying only on hardcoded rules: it learns self-updaters,
+> failing update methods, ineffective service fixes, and actions the user keeps rejecting,
+> and applies them at the updater's method order and the issue-analysis confidence gate —
+> and surfaces what it has learned into the issue-analysis prompt. All effects are
+> conservative (skip / deprioritise / capped confidence haircut) and security actions are
+> never penalised (in the gate AND the prompt). The motivating case — Eir *discovering*
+> that Discord self-updates and to stop fighting it — is learned from the audit history
+> (`learn/`), with the hardcoded `SELF_UPDATING` seed kept only as a cold-start default.
+> The rest of this section is the design of record; per-phase status is in the plan below.
 
 ### Principle
 
@@ -851,15 +854,20 @@ behaviour change is the trust risk, and the card is the answer.
    genuinely too-large/too-slow install (legitimately exceeding the 600s cap) reads the
    same as a self-updater hang; it is periodically re-probed and clearable, and Phase 2's
    finer signals refine it.*
-2. **Phase 2 — Method preference + decay/re-probe.** `MethodFailing` →
-   `DeprioritiseMethod` in `heal()` (reorder, never remove); decay floor → expiry;
-   re-probe cadence.
-3. **Phase 3 — Confidence + signal-noise learning (closes the rejection gap).**
-   `approval_rejections` (write a row in the `Approve{approved:false}` branch),
-   `FixIneffective` / `RecurringFingerprint` / `RejectedSignal`, confidence haircut into
-   the **existing** policy gate, fingerprint suppression (security/failed-service
-   excluded), learned-facts read-only section in the prompt. *Risk: medium — touches the
-   hot path; mitigated by cap + exclusions + conservative effects.*
+2. **Phase 2 — Method preference + decay/re-probe. ✅ Shipped (v0.13.0).** `MethodFailing`
+   → `DeprioritiseMethod` in `heal()` (stable-sort to the back, never removed); the
+   evidence-window reconcile from Phase 1 generalised to every kind = decay/re-probe.
+   Review fix: only method-attributable failure categories count — an integrity rejection
+   (`hash_mismatch`/`signature_rejected`) never deprioritises the method that caught it.
+3. **Phase 3 — Confidence + signal-noise learning; issue analysis uses learning.
+   ✅ Shipped (v0.13.0).** `migration 0009` `approval_rejections` (written on
+   `Approve{approved:false}`); `FixIneffective` (service fixes that never reduce failed
+   services — only when the type *never* helps) and `RejectedSignal` (exact action label)
+   → a **capped confidence haircut into the existing policy gate**, never for security
+   actions; a read-only "what Eir has learned" section injected into the issue-analysis
+   prompt (base + advisor-escalation), with the security carve-out applied to the prompt
+   too. `analyse_issues()` runs each decision cycle. *`RecurringFingerprint` deferred —
+   overlaps `FixIneffective` and needs per-decision fingerprint identity.*
 4. **Phase 4 — UI transparency + user override.** `LearnedFactView` + Pin/Disable/Forget,
    the "What Eir has learned" card, precedence enforcement.
 5. **Phase 5 (optional) — AI labeller (Tier 2).** Bounded AI explanation / narrower

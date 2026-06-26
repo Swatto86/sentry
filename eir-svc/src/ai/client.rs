@@ -219,8 +219,9 @@ impl AiClient {
         snapshot: &SignalSnapshot,
         history: &[PastDecision],
         feedback_summary: Option<&str>,
+        learned: Option<&str>,
     ) -> Result<(ClaudeDecision, Option<CallUsage>)> {
-        self.analyze_with(snapshot, history, feedback_summary, None, None)
+        self.analyze_with(snapshot, history, feedback_summary, learned, None, None)
             .await
     }
 
@@ -229,17 +230,19 @@ impl AiClient {
     /// every provider; the effort override applies to the Claude CLI only (other
     /// providers have no effort dial, so it is ignored there). A `None` (or empty)
     /// override keeps the configured value.
+    #[allow(clippy::too_many_arguments)]
     pub async fn analyze_with(
         &self,
         snapshot: &SignalSnapshot,
         history: &[PastDecision],
         feedback_summary: Option<&str>,
+        learned: Option<&str>,
         model_override: Option<&str>,
         effort_override: Option<&str>,
     ) -> Result<(ClaudeDecision, Option<CallUsage>)> {
         let model_ov = model_override.map(str::trim).filter(|s| !s.is_empty());
         let effort_ov = effort_override.map(str::trim).filter(|s| !s.is_empty());
-        let prompt = crate::ai::prompt::build(snapshot, history, feedback_summary);
+        let prompt = crate::ai::prompt::build(snapshot, history, feedback_summary, learned);
         let (raw, usage) = match &self.config {
             AiClientConfig::Anthropic { api_key, model } => {
                 let m = model_ov.unwrap_or(model);
