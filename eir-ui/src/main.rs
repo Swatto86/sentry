@@ -202,10 +202,7 @@ async fn set_advisor_settings(
 
 #[tauri::command]
 fn get_autostart_enabled(handle: AppHandle) -> Result<bool, String> {
-    Ok(handle
-        .autolaunch()
-        .is_enabled()
-        .map_err(|e| e.to_string())?)
+    handle.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
