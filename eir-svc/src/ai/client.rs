@@ -350,10 +350,10 @@ impl AiClient {
                     continue;
                 };
                 match ev["type"].as_str() {
-                    Some("content_block_delta") => {
-                        if ev["delta"]["type"].as_str() == Some("text_delta") {
-                            out.push_str(ev["delta"]["text"].as_str().unwrap_or(""));
-                        }
+                    Some("content_block_delta")
+                        if ev["delta"]["type"].as_str() == Some("text_delta") =>
+                    {
+                        out.push_str(ev["delta"]["text"].as_str().unwrap_or(""));
                     }
                     Some("message_start") => {
                         let u = &ev["message"]["usage"];
