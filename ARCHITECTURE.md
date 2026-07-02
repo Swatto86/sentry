@@ -280,7 +280,7 @@ The frontend was fully rebuilt in v0.17 (still hand-written vanilla HTML/CSS/JS,
 
 ## Service decision loop, state & off-loop executor
 
-The heart of `eir-svc` is a single async supervisory loop in `eir-svc/src/main.rs` that owns all mutable service state, collects signals, gates AI-proposed fixes through policy, and dispatches actual execution to a separate worker so the loop never blocks. All paths cite `eir-svc/src/main.rs`.
+The heart of `eir-svc` is a single async supervisory loop in `eir-svc/src/main.rs` that owns all mutable service state, collects signals, gates AI-proposed fixes through policy, and dispatches both the AI analysis call and actual fix execution to separate off-loop tasks so the loop never blocks. All paths cite `eir-svc/src/main.rs`.
 
 ### Process entry & service boilerplate
 
@@ -325,25 +325,20 @@ The outer `tokio::select!` races the main loop future against the `shutdown` fut
 4. `update_done_rx` — an update cycle finished: clears `updater_running`/`updater.running`, records `last_run`/`last_cost_usd`/`notes`/`apps`, sets `phase="idle"`, refreshes history, recomputes `next_run`.
 5. `update_progress_rx` — coarse live phase label; **guarded on `updater_running`** so a straggling message can't overwrite the `idle` a just-finished cycle set.
 6. `exec_done_rx` — a fix finished on the worker: removes label from `in_flight`, pushes an execution + a `auto_executed=true` problem entry, settles `resting_status`. Explicitly **does not touch `st.error`** so an execution outcome can't wipe an unrelated AI/connection error.
-7. `ui_rx` — UI commands (see below).
+7. `analysis_done_rx` — the off-loop AI analysis (and optional advisor escalation) finished: on `Err`, sets `status="Error"`/`error` and continues; on `Ok`, destructures the returned `AnalysisSuccess`, logs usage, updates `last_fingerprint`/`last_analysis_at`/`st.advisor*`, reloads `learned_facts` fresh (they may have changed during the multi-minute call), then runs `audit::log_decision` and the **same per-problem routing + tray-status logic previously inline in the per-cycle body** (see below).
+8. `ui_rx` — UI commands (see below).
 
-#### Per-cycle body (after a tick, lines 975-1372)
+#### Per-cycle body (after a tick, lines ~1287-1525)
 
-- `cycle_count += 1`; every 20 cycles re-discovers log dirs and feeds new ones to `file_watch` via `dir_update_tx` (978-996).
-- **Scheduled updater** (999-1015): if `enabled && !paused && !updater_running && (last_run==0 || elapsed >= interval)`, sets running flags, `phase="checking…"`, and `spawn_update_cycle`.
-- `if st.paused { continue; }` (1017-1019) — paused skips analysis but **still ran the updater gate above** (which itself checks `!paused`, so paused also suppresses updates).
+- `cycle_count += 1`; every 20 cycles re-discovers log dirs and feeds new ones to `file_watch` via `dir_update_tx`.
+- **Scheduled updater**: if `enabled && !paused && !updater_running && (last_run==0 || elapsed >= interval)`, sets running flags, `phase="checking…"`, and `spawn_update_cycle`.
+- `if st.paused { continue; }` — paused skips analysis but **still ran the updater gate above** (which itself checks `!paused`, so paused also suppresses updates).
 - Collects `decision_history` (last 5), builds a `SignalSnapshot` (event log + file changes drain + wmi current), updates live metrics, broadcasts.
-- `let Some(ai) = ai.as_ref() else { continue }` (1054-1056) — no provider configured: keep collecting/serving UI, skip analysis.
-- Updates feedback after-states and pulls `feedback::recent_summary`.
-- **Idle-skip gate** (1071-1088): computes `actionable_fingerprint`; `changed = fingerprint.is_some() && != last_fingerprint`; `heartbeat_due` if `last_analysis_at` is `None` (forces baseline) or elapsed ≥ `ANALYSIS_HEARTBEAT` (6 h). If `!changed && !heartbeat_due`, settle `resting_status`, clear error (unless paused), broadcast, `continue` — saves AI spend on unchanged idle cycles.
-- **Claude analysis** (1091-1112): `ai.analyze(...)` returns `(decision, usage)`; usage is logged and the summary recomputed; on error sets `status="Error"`/`error` and continues. After success, `last_fingerprint`/`last_analysis_at` are updated and `st.last_analysis` set.
-- **Advisor escalation** (1122-1179): resets day-counters at the UTC boundary, builds an `AdvisorStatus`, and if `should_escalate` returns `Some(reason)`, increments `advisor_escalations_today` **before** the call (so a failing escalation can't retry every cycle and defeat the cap), re-analyses via `ai.analyze_with(model, effort)`, adds usage cost to `advisor_spent_today`, and on success replaces `claude_decision`/`last_analysis` and marks `adv.escalated`.
-- `audit::log_decision` returns `decision_id` (1181-1193). Logs `safety::success_rate` and warns if < 0.85.
-- **Per-problem routing** (1206-1355): for each problem, `parse_fix_action()`; an unparseable fix becomes a blocked problem (`blocked=true`). Otherwise `pol.evaluate(&action, confidence)`:
-  - `Block(reason)` → push blocked problem.
-  - `AutoApprove` → check `safety::rate_limited`; if not rate-limited and label not in `in_flight`, insert label, send an `ExecJob` (reason `None`) to the executor, set `status="Executing"`.
-  - `RequireApproval(reason)` → **non-blocking**: skip if label already in `pending` or `in_flight` (prevents a double-run), else build `ApprovalInfo` (via `explain::explain`/`target_details`), `insert_pending_approval` (DB), push to `st.pending` with the DB row id, set `status="PendingApproval"`. On DB failure it surfaces the finding as a blocked problem so it isn't lost.
-- Finally computes a tray status with precedence `Paused > PendingApproval > Executing > Warning(problems_found) > Active` (1357-1372) and broadcasts.
+- `let Some(ai) = ai.as_ref() else { continue }` — no provider configured: keep collecting/serving UI, skip analysis.
+- **`if analysis_running { continue; }`** — an off-loop analysis (below) is already in flight; resettle `resting_status`, clear error (unless paused), broadcast, and skip this pass entirely (including the feedback/label/idle-skip work below it), so a redundant tick or reaction never queues a second overlapping analysis.
+- Updates feedback after-states and pulls `feedback::recent_summary`; runs `learn::label_one` and refreshes `learned_facts` for the UI card.
+- **Idle-skip gate**: computes `actionable_fingerprint`; `changed = fingerprint.is_some() && != last_fingerprint`; `heartbeat_due` if `last_analysis_at` is `None` (forces baseline) or elapsed ≥ `ANALYSIS_HEARTBEAT` (6 h). If `!changed && !heartbeat_due`, settle `resting_status`, clear error (unless paused), broadcast, `continue` — saves AI spend on unchanged idle cycles.
+- `learn::analyse_issues` + `LearnedFacts::load` build `learned_section` for the prompt, then **the AI call is dispatched off-loop** (see "Off-loop analysis task" below) and the per-cycle body `continue`s immediately — `ai.analyze(...)`, the optional advisor escalation, `audit::log_decision`, the per-problem routing, and the tray-status broadcast all now run in the `analysis_done_rx` arm once the task reports back, not inline here.
 
 #### UI command handlers (`ui_rx`, lines 787-971)
 
@@ -361,6 +356,14 @@ To keep the loop responsive, fix execution is serialised on a dedicated worker:
 - `ExecOutcome` (391-400): `label`, `exec_action` (executed action's Debug form), `success`, `output`, `diagnosis`, `confidence`, `reason`.
 - `spawn_executor` (407-458): consumes `ExecJob`s on an unbounded channel; each job runs `executor::execute` inside an inner `tokio::spawn` so a **panic is isolated** (JoinError → a failed `ExecutionResult` "execution task panicked", worker survives). It then `audit::log_execution`, `mark_decision_executed`, and `feedback::record`, and finally sends `ExecOutcome` back on `done_tx` (ignored if the loop is gone = shutting down).
 - The loop sends jobs via `exec_tx` and folds outcomes via the `exec_done_rx` arm. Unbounded channels are used deliberately (job volume bounded by problems-per-cycle + approvals) so a send never blocks the loop.
+
+### Off-loop analysis task (`AnalysisSuccess`, lines ~413-423, spawn ~1435-1525)
+
+The AI call — `ai.analyze(...)` plus its optional advisor-escalation `ai.analyze_with(...)` — is the other multi-minute call on the loop (shells out to the Claude CLI or hits an HTTP API), so it's dispatched the same way as `spawn_update_cycle`, gated by a loop-local `analysis_running` flag (never overlaps a running analysis) instead of blocking `ui_rx` inline:
+- `AnalysisSuccess` carries everything the receiving arm needs back from the task: `snapshot`, `fingerprint`, `decision`, `usage: Vec<CallUsage>`, `advisor: AdvisorStatus`, `advisor_spent_today`, `advisor_escalations_today`. The channel carries `Result<AnalysisSuccess, String>` directly — no separate outcome wrapper.
+- The spawned task mirrors `spawn_update_cycle`'s hardening: the real work runs in a nested inner `tokio::spawn` under a `tokio::time::timeout(ANALYSIS_MAX = 10 min, …)`, so a panic (`JoinError`) or a hang still sends a `Result::Err` and releases `analysis_running` — an analysis can never latch "running" forever.
+- Inside the task: `ai.analyze(...)`; if `should_escalate` returns `Some(reason)`, re-analyses via `ai.analyze_with(model, effort)` and folds the escalation's usage/decision/`AdvisorStatus` in — the same advisor logic as before, just running off-loop.
+- The `analysis_done_rx` arm (see the select-arm list above) is where `audit::log_decision`, the **per-problem routing**, and the tray-status broadcast now live, unchanged from before the move: `parse_fix_action()` (unparseable → blocked problem), then `pol.evaluate(&action, confidence)` → `Block(reason)` pushes a blocked problem; `AutoApprove` checks `safety::rate_limited` + `in_flight` dedupe and sends an `ExecJob` (reason `None`); `RequireApproval(reason)` dedupes against `pending`/`in_flight`, builds `ApprovalInfo`, and `insert_pending_approval`s. Finally computes the tray status (`Paused > PendingApproval > Executing > Warning(problems_found) > Active`) and broadcasts.
 
 ### `actionable_fingerprint` (lines 465-525)
 

@@ -16,7 +16,10 @@ use eir_proto::{
     AdvisorStatus, ApprovalInfo, ExecutionSummary, LearnedFactView, ProblemSummary, StatusPayload,
     UiMsg, UiSettings, UpdaterStatus, UsageSummary,
 };
-use models::{ExecutionResult, FixAction, PendingApproval, SignalSnapshot, SystemState};
+use models::{
+    CallUsage, ClaudeDecision, ExecutionResult, FixAction, PendingApproval, SignalSnapshot,
+    SystemState,
+};
 use sqlx::SqlitePool;
 use std::{
     collections::{HashSet, VecDeque},
@@ -404,6 +407,19 @@ struct ExecOutcome {
     reason: Option<String>,
 }
 
+/// Slow AI work for one decision-loop pass, run off-loop (mirrors ExecJob/ExecOutcome
+/// and spawn_update_cycle's hardening) so ui_rx keeps being polled while an analysis
+/// (and its optional advisor escalation) is in flight.
+struct AnalysisSuccess {
+    snapshot: SignalSnapshot,
+    fingerprint: Option<String>,
+    decision: ClaudeDecision,
+    usage: Vec<CallUsage>,
+    advisor: AdvisorStatus,
+    advisor_spent_today: f64,
+    advisor_escalations_today: u32,
+}
+
 /// Spawn the single executor worker. It serialises fix-action execution off the
 /// decision loop: each job runs `executor::execute` (panic-isolated) and writes the
 /// audit/feedback records, then reports an [`ExecOutcome`] back over `done_tx` for the
@@ -625,8 +641,9 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     st.advisor_spend_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     // A bad AI config must NOT kill the service — degrade instead, so the pipe
     // and UI stay alive and the user can fix it in Settings.
-    let ai = match ai::client::AiClient::new(&cfg.api) {
-        Ok(c) => Some(c),
+    let ai: Option<std::sync::Arc<ai::client::AiClient>> = match ai::client::AiClient::new(&cfg.api)
+    {
+        Ok(c) => Some(std::sync::Arc::new(c)),
         Err(e) => {
             error!("AI client init failed: {e}");
             st.status = "Error".to_string();
@@ -705,6 +722,12 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
     let (exec_tx, exec_rx) = tokio::sync::mpsc::unbounded_channel::<ExecJob>();
     let (exec_done_tx, mut exec_done_rx) = tokio::sync::mpsc::unbounded_channel::<ExecOutcome>();
     spawn_executor(&db, exec_rx, exec_done_tx);
+    // AI analysis (and its optional advisor escalation) runs off the loop too — see
+    // the analysis_done_rx arm below — so a multi-minute call never delays ui_rx.
+    let (analysis_done_tx, mut analysis_done_rx) =
+        tokio::sync::mpsc::channel::<Result<AnalysisSuccess, String>>(2);
+    let mut analysis_running = false;
+    const ANALYSIS_MAX: Duration = Duration::from_secs(10 * 60);
     let mut cycle_count = 0u64;
     // Reactive-trigger pacing: a trigger *schedules* a reaction (react_at)
     // rather than running one inline — the debounce lets an error burst
@@ -802,6 +825,252 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                         // Don't touch st.error here: an execution outcome must not wipe
                         // an unrelated AI/connection error set by another path.
                         st.status = resting_status(&st);
+                        pipe.broadcast_status(build_status(&st));
+                        continue;
+                    }
+                    Some(outcome) = analysis_done_rx.recv() => {
+                        analysis_running = false;
+                        let AnalysisSuccess {
+                            snapshot,
+                            fingerprint,
+                            decision,
+                            usage,
+                            advisor,
+                            advisor_spent_today,
+                            advisor_escalations_today,
+                        } = match outcome {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("AI analysis failed: {e}");
+                                st.status = "Error".to_string();
+                                st.error = Some(format!("AI: {e}"));
+                                pipe.broadcast_status(build_status(&st));
+                                continue;
+                            }
+                        };
+                        let claude_decision = decision;
+
+                        for u in &usage {
+                            if let Err(e) = audit::log_usage(&db, u).await {
+                                warn!("Failed to log usage: {e}");
+                            }
+                        }
+                        if !usage.is_empty() {
+                            match audit::usage_summary(&db).await {
+                                Ok(s) => st.usage = Some(s),
+                                Err(e) => warn!("Failed to compute usage summary: {e}"),
+                            }
+                        }
+
+                        // Remember this state + time so unchanged idle cycles are skipped
+                        // until the next heartbeat.
+                        last_fingerprint = fingerprint;
+                        last_analysis_at = Some(std::time::Instant::now());
+
+                        st.last_analysis = claude_decision.analysis.clone();
+                        st.error = None;
+
+                        st.advisor_spent_today = advisor_spent_today;
+                        st.advisor_escalations_today = advisor_escalations_today;
+                        st.advisor = Some(advisor);
+
+                        // learned_facts may have changed during the (possibly minutes-long) analysis;
+                        // reload fresh rather than reusing the pre-spawn snapshot.
+                        let learned_facts = learn::LearnedFacts::load(&db).await;
+
+                        let decision_id = match audit::log_decision(&db, &snapshot, &claude_decision).await {
+                            Ok(id) => id,
+                            Err(e) => {
+                                error!("Failed to write audit log: {e}");
+                                continue;
+                            }
+                        };
+
+                        if let Ok(rate) = safety::success_rate(&db).await {
+                            info!(success_rate = format!("{:.1}%", rate * 100.0), "Execution stats");
+                            if rate < 0.85 {
+                                warn!(
+                                    success_rate = format!("{:.1}%", rate * 100.0),
+                                    "Success rate below 85% — consider raising confidence_threshold"
+                                );
+                            }
+                        }
+
+                        // ── Per-problem routing ──────────────────────────────────────
+                        let problems_found = !claude_decision.problems.is_empty();
+
+                        for problem in &claude_decision.problems {
+                            info!(
+                                confidence = problem.confidence,
+                                diagnosis  = %problem.diagnosis,
+                                "Problem identified"
+                            );
+
+                            let Some(action) = problem.parse_fix_action() else {
+                                warn!(fix = %problem.proposed_fix, "Unknown action type — skipping");
+                                push_problem(
+                                    &mut st,
+                                    &problem.diagnosis,
+                                    problem.confidence,
+                                    &problem.proposed_fix.to_string(),
+                                    true,
+                                    false,
+                                    Some("unrecognised fix action".into()),
+                                );
+                                pipe.broadcast_status(build_status(&st));
+                                continue;
+                            };
+
+                            // Self-improvement: shave a capped amount off confidence for an action
+                            // the machine has learned is ineffective or that the user keeps
+                            // rejecting, so the EXISTING policy gate accounts for it. Never lowers a
+                            // security action (see apply::confidence_penalty).
+                            let action_label = format!("{action:?}");
+                            let confidence =
+                                (problem.confidence - learned_facts.confidence_penalty(&action_label)).max(0.0);
+
+                            match pol.evaluate(&action, confidence) {
+                                policy::Verdict::Block(reason) => {
+                                    info!(reason = %reason, "Blocked by policy");
+                                    push_problem(
+                                        &mut st,
+                                        &problem.diagnosis,
+                                        problem.confidence,
+                                        &format!("{action:?}"),
+                                        true,
+                                        false,
+                                        Some(reason),
+                                    );
+                                    pipe.broadcast_status(build_status(&st));
+                                }
+
+                                policy::Verdict::AutoApprove => {
+                                    match safety::rate_limited(
+                                        &db,
+                                        &action,
+                                        pol.execution.rate_limit_mins,
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => {
+                                            info!(action = ?action, "Rate-limited — skipping");
+                                            continue;
+                                        }
+                                        Err(e) => warn!("Rate limit check failed: {e}"),
+                                        Ok(false) => {}
+                                    }
+
+                                    let label = format!("{action:?}");
+                                    if st.in_flight.contains(&label) {
+                                        info!(action = %label, "Already executing — skipping duplicate");
+                                        continue;
+                                    }
+                                    info!(action = ?action, "AUTO-EXECUTING (queued)");
+                                    // Hand off to the executor worker and move on; the outcome
+                                    // is folded in when it finishes (see exec_done_rx arm).
+                                    st.in_flight.insert(label.clone());
+                                    let _ = exec_tx.send(ExecJob {
+                                        action: action.clone(),
+                                        decision_id,
+                                        baseline: snapshot.system_state.clone(),
+                                        label,
+                                        diagnosis: problem.diagnosis.clone(),
+                                        confidence: problem.confidence,
+                                        reason: None,
+                                    });
+                                    st.status = "Executing".to_string();
+                                    pipe.broadcast_status(build_status(&st));
+                                }
+
+                                policy::Verdict::RequireApproval(reason) => {
+                                    // Non-blocking: queue the action (persisted to the DB)
+                                    // and move on. The user can approve or reject it from
+                                    // the UI whenever they like — the loop never stalls and
+                                    // the approval never expires out from under them.
+                                    let action_label = format!("{action:?}");
+                                    // Skip if it's already queued for approval OR already running
+                                    // off-loop — otherwise a re-surfacing problem could queue a
+                                    // second card for an in-flight approved action and double-run it.
+                                    if st.pending.iter().any(|p| p.info.action == action_label)
+                                        || st.in_flight.contains(&action_label)
+                                    {
+                                        info!(action = %action_label, "Already awaiting approval or executing — skipping duplicate");
+                                        continue;
+                                    }
+                                    info!(reason = %reason, action = %action_label, "Queued for approval");
+
+                                    let explanation = explain::explain(&action);
+                                    let info = ApprovalInfo {
+                                        id: 0, // replaced with the DB row id below
+                                        diagnosis:         problem.diagnosis.clone(),
+                                        root_cause:        problem.root_cause.clone(),
+                                        confidence:        problem.confidence,
+                                        action:            action_label.clone(),
+                                        reason:            reason.clone(),
+                                        side_effects:      problem.side_effects.clone(),
+                                        undo_instructions: problem.undo_instructions.clone(),
+                                        action_summary:    explanation.summary,
+                                        target:            explanation.target,
+                                        target_details:    explain::target_details(&action),
+                                        reversible:        explanation.reversible,
+                                        created_at:        chrono::Utc::now().timestamp(),
+                                    };
+
+                                    match audit::insert_pending_approval(
+                                        &db,
+                                        decision_id,
+                                        &action,
+                                        &info,
+                                        &snapshot.system_state,
+                                    )
+                                    .await
+                                    {
+                                        Ok(row_id) => {
+                                            let mut info = info;
+                                            info.id = row_id as u64;
+                                            st.pending.push(PendingApproval {
+                                                info,
+                                                action: action.clone(),
+                                                decision_id,
+                                                baseline: snapshot.system_state.clone(),
+                                            });
+                                            st.status = "PendingApproval".to_string();
+                                            pipe.broadcast_status(build_status(&st));
+                                        }
+                                        Err(e) => {
+                                            // Don't lose the finding — surface it as a problem.
+                                            error!("Failed to queue approval: {e}");
+                                            push_problem(
+                                                &mut st,
+                                                &problem.diagnosis,
+                                                problem.confidence,
+                                                &action_label,
+                                                true,
+                                                false,
+                                                Some(format!("could not queue for approval: {e}")),
+                                            );
+                                            pipe.broadcast_status(build_status(&st));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let tray_status = if st.paused {
+                            "Paused"
+                        } else if !st.pending.is_empty() {
+                            "PendingApproval"
+                        } else if !st.in_flight.is_empty() {
+                            "Executing"
+                        } else if problems_found {
+                            "Warning"
+                        } else {
+                            "Active"
+                        }
+                        .to_string();
+                        if !st.paused {
+                            st.status = tray_status;
+                        }
                         pipe.broadcast_status(build_status(&st));
                         continue;
                     }
@@ -1102,6 +1371,16 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                     continue;
                 };
 
+                if analysis_running {
+                    info!("Analysis already in flight - skipping this pass");
+                    st.status = resting_status(&st);
+                    if !st.paused {
+                        st.error = None;
+                    }
+                    pipe.broadcast_status(build_status(&st));
+                    continue;
+                }
+
                 // ── Feedback after-states ────────────────────────────────────
                 if let Err(e) =
                     feedback::update_after_states(&db, &snapshot.system_state).await
@@ -1153,301 +1432,97 @@ async fn eir_main<F: std::future::Future<Output = ()>>(shutdown: F) {
                 let learned_facts = learn::LearnedFacts::load(&db).await;
                 let learned_section = learned_facts.prompt_section();
 
-                // ── Claude analysis ──────────────────────────────────────────
-                let mut claude_decision =
-                    match ai
-                        .analyze(&snapshot, &history, Some(&feedback_summary), learned_section.as_deref())
-                        .await
-                    {
-                        Ok((d, usage)) => {
-                            if let Some(u) = usage {
-                                if let Err(e) = audit::log_usage(&db, &u).await {
-                                    warn!("Failed to log usage: {e}");
-                                }
-                                match audit::usage_summary(&db).await {
-                                    Ok(s) => st.usage = Some(s),
-                                    Err(e) => warn!("Failed to compute usage summary: {e}"),
-                                }
-                            }
-                            d
-                        }
-                        Err(e) => {
-                            error!("AI analysis failed: {e}");
-                            st.status = "Error".to_string();
-                            st.error  = Some(format!("AI: {e}"));
-                            pipe.broadcast_status(build_status(&st));
-                            continue;
-                        }
-                    };
+                // ── Claude analysis (off-loop) ────────────────────────────────
+                // Day-rollover reset for the advisor's daily counters - must happen
+                // before handing baselines to the off-loop analysis task.
+                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+                if st.advisor_spend_date != today {
+                    st.advisor_spend_date = today;
+                    st.advisor_spent_today = 0.0;
+                    st.advisor_escalations_today = 0;
+                }
 
-                // Remember this state + time so unchanged idle cycles are skipped
-                // until the next heartbeat.
-                last_fingerprint = fingerprint;
-                last_analysis_at = Some(std::time::Instant::now());
-
-                st.last_analysis = claude_decision.analysis.clone();
-                st.error         = None;
-
-                // ── Advisor mode: re-think harder once if warranted ───────────
-                {
-                    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                    if st.advisor_spend_date != today {
-                        st.advisor_spend_date = today;
-                        st.advisor_spent_today = 0.0;
-                        st.advisor_escalations_today = 0;
-                    }
-                    let mut adv = AdvisorStatus {
-                        enabled: cfg.advisor.enabled,
-                        escalated: false,
-                        escalation_model: String::new(),
-                        reason: String::new(),
-                        spent_today_usd: st.advisor_spent_today,
-                        settings: cfg.advisor.to_view(),
-                    };
-                    if let Some(reason) = should_escalate(
-                        &claude_decision,
-                        &cfg.advisor,
-                        st.advisor_spent_today,
-                        st.advisor_escalations_today,
-                    ) {
-                        info!(reason, "Advisor escalating to a deeper analysis pass");
-                        // Count the attempt (even if it fails) so a failing escalation
-                        // can't retry every cycle and defeat the cap.
-                        st.advisor_escalations_today += 1;
-                        match ai
-                            .analyze_with(
-                                &snapshot,
-                                &history,
-                                Some(&feedback_summary),
-                                learned_section.as_deref(),
-                                Some(cfg.advisor.escalation_model.as_str()),
-                                Some(cfg.advisor.escalation_effort.as_str()),
-                            )
+                analysis_running = true;
+                let ai_task = ai.clone();
+                let advisor_cfg = cfg.advisor.clone();
+                let spent_baseline = st.advisor_spent_today;
+                let escalations_baseline = st.advisor_escalations_today;
+                let tx = analysis_done_tx.clone();
+                tokio::spawn(async move {
+                    let mut inner = tokio::spawn(async move {
+                        match ai_task
+                            .analyze(&snapshot, &history, Some(&feedback_summary), learned_section.as_deref())
                             .await
                         {
-                            Ok((d2, usage2)) => {
-                                if let Some(u) = usage2 {
-                                    st.advisor_spent_today += u.cost_usd;
-                                    if let Err(e) = audit::log_usage(&db, &u).await {
-                                        warn!("Failed to log escalation usage: {e}");
-                                    }
-                                    if let Ok(s) = audit::usage_summary(&db).await {
-                                        st.usage = Some(s);
+                            Ok((decision, usage)) => {
+                                let mut usages = Vec::new();
+                                usages.extend(usage);
+                                let mut adv = AdvisorStatus {
+                                    enabled: advisor_cfg.enabled,
+                                    escalated: false,
+                                    escalation_model: String::new(),
+                                    reason: String::new(),
+                                    spent_today_usd: spent_baseline,
+                                    settings: advisor_cfg.to_view(),
+                                };
+                                let mut spent = spent_baseline;
+                                let mut escalations = escalations_baseline;
+                                let mut final_decision = decision;
+                                if let Some(reason) =
+                                    should_escalate(&final_decision, &advisor_cfg, spent, escalations)
+                                {
+                                    info!(reason, "Advisor escalating to a deeper analysis pass");
+                                    escalations += 1;
+                                    match ai_task
+                                        .analyze_with(
+                                            &snapshot,
+                                            &history,
+                                            Some(&feedback_summary),
+                                            learned_section.as_deref(),
+                                            Some(advisor_cfg.escalation_model.as_str()),
+                                            Some(advisor_cfg.escalation_effort.as_str()),
+                                        )
+                                        .await
+                                    {
+                                        Ok((d2, usage2)) => {
+                                            if let Some(u) = &usage2 { spent += u.cost_usd; }
+                                            usages.extend(usage2);
+                                            final_decision = d2;
+                                            adv.escalated = true;
+                                            adv.reason = reason.to_string();
+                                            adv.escalation_model = advisor_cfg.escalation_model.clone();
+                                            adv.spent_today_usd = spent;
+                                        }
+                                        Err(e) => warn!("Advisor escalation failed: {e}"),
                                     }
                                 }
-                                claude_decision = d2;
-                                st.last_analysis = claude_decision.analysis.clone();
-                                adv.escalated = true;
-                                adv.reason = reason.to_string();
-                                adv.escalation_model = cfg.advisor.escalation_model.clone();
-                                adv.spent_today_usd = st.advisor_spent_today;
+                                Ok(AnalysisSuccess {
+                                    snapshot,
+                                    fingerprint,
+                                    decision: final_decision,
+                                    usage: usages,
+                                    advisor: adv,
+                                    advisor_spent_today: spent,
+                                    advisor_escalations_today: escalations,
+                                })
                             }
-                            Err(e) => warn!("Advisor escalation failed: {e}"),
+                            Err(e) => Err(e.to_string()),
                         }
-                    }
-                    st.advisor = Some(adv);
-                }
-
-                let decision_id = match audit::log_decision(
-                    &db,
-                    &snapshot,
-                    &claude_decision,
-                )
-                .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        error!("Failed to write audit log: {e}");
-                        continue;
-                    }
-                };
-
-                if let Ok(rate) = safety::success_rate(&db).await {
-                    info!(success_rate = format!("{:.1}%", rate * 100.0), "Execution stats");
-                    if rate < 0.85 {
-                        warn!(
-                            success_rate = format!("{:.1}%", rate * 100.0),
-                            "Success rate below 85% — consider raising confidence_threshold"
-                        );
-                    }
-                }
-
-                // ── Per-problem routing ──────────────────────────────────────
-                let problems_found = !claude_decision.problems.is_empty();
-
-                for problem in &claude_decision.problems {
-                    info!(
-                        confidence = problem.confidence,
-                        diagnosis  = %problem.diagnosis,
-                        "Problem identified"
-                    );
-
-                    let Some(action) = problem.parse_fix_action() else {
-                        warn!(fix = %problem.proposed_fix, "Unknown action type — skipping");
-                        push_problem(
-                            &mut st,
-                            &problem.diagnosis,
-                            problem.confidence,
-                            &problem.proposed_fix.to_string(),
-                            true,
-                            false,
-                            Some("unrecognised fix action".into()),
-                        );
-                        pipe.broadcast_status(build_status(&st));
-                        continue;
+                    });
+                    let outcome = match tokio::time::timeout(ANALYSIS_MAX, &mut inner).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_join)) => Err("analysis task panicked".to_string()),
+                        Err(_elapsed) => {
+                            inner.abort();
+                            Err(format!(
+                                "analysis exceeded {}m and was stopped",
+                                ANALYSIS_MAX.as_secs() / 60
+                            ))
+                        }
                     };
-
-                    // Self-improvement: shave a capped amount off confidence for an action
-                    // the machine has learned is ineffective or that the user keeps
-                    // rejecting, so the EXISTING policy gate accounts for it. Never lowers a
-                    // security action (see apply::confidence_penalty).
-                    let action_label = format!("{action:?}");
-                    let confidence =
-                        (problem.confidence - learned_facts.confidence_penalty(&action_label)).max(0.0);
-
-                    match pol.evaluate(&action, confidence) {
-                        policy::Verdict::Block(reason) => {
-                            info!(reason = %reason, "Blocked by policy");
-                            push_problem(
-                                &mut st,
-                                &problem.diagnosis,
-                                problem.confidence,
-                                &format!("{action:?}"),
-                                true,
-                                false,
-                                Some(reason),
-                            );
-                            pipe.broadcast_status(build_status(&st));
-                        }
-
-                        policy::Verdict::AutoApprove => {
-                            match safety::rate_limited(
-                                &db,
-                                &action,
-                                pol.execution.rate_limit_mins,
-                            )
-                            .await
-                            {
-                                Ok(true) => {
-                                    info!(action = ?action, "Rate-limited — skipping");
-                                    continue;
-                                }
-                                Err(e) => warn!("Rate limit check failed: {e}"),
-                                Ok(false) => {}
-                            }
-
-                            let label = format!("{action:?}");
-                            if st.in_flight.contains(&label) {
-                                info!(action = %label, "Already executing — skipping duplicate");
-                                continue;
-                            }
-                            info!(action = ?action, "AUTO-EXECUTING (queued)");
-                            // Hand off to the executor worker and move on; the outcome
-                            // is folded in when it finishes (see exec_done_rx arm).
-                            st.in_flight.insert(label.clone());
-                            let _ = exec_tx.send(ExecJob {
-                                action: action.clone(),
-                                decision_id,
-                                baseline: snapshot.system_state.clone(),
-                                label,
-                                diagnosis: problem.diagnosis.clone(),
-                                confidence: problem.confidence,
-                                reason: None,
-                            });
-                            st.status = "Executing".to_string();
-                            pipe.broadcast_status(build_status(&st));
-                        }
-
-                        policy::Verdict::RequireApproval(reason) => {
-                            // Non-blocking: queue the action (persisted to the DB)
-                            // and move on. The user can approve or reject it from
-                            // the UI whenever they like — the loop never stalls and
-                            // the approval never expires out from under them.
-                            let action_label = format!("{action:?}");
-                            // Skip if it's already queued for approval OR already running
-                            // off-loop — otherwise a re-surfacing problem could queue a
-                            // second card for an in-flight approved action and double-run it.
-                            if st.pending.iter().any(|p| p.info.action == action_label)
-                                || st.in_flight.contains(&action_label)
-                            {
-                                info!(action = %action_label, "Already awaiting approval or executing — skipping duplicate");
-                                continue;
-                            }
-                            info!(reason = %reason, action = %action_label, "Queued for approval");
-
-                            let explanation = explain::explain(&action);
-                            let info = ApprovalInfo {
-                                id: 0, // replaced with the DB row id below
-                                diagnosis:         problem.diagnosis.clone(),
-                                root_cause:        problem.root_cause.clone(),
-                                confidence:        problem.confidence,
-                                action:            action_label.clone(),
-                                reason:            reason.clone(),
-                                side_effects:      problem.side_effects.clone(),
-                                undo_instructions: problem.undo_instructions.clone(),
-                                action_summary:    explanation.summary,
-                                target:            explanation.target,
-                                target_details:    explain::target_details(&action),
-                                reversible:        explanation.reversible,
-                                created_at:        chrono::Utc::now().timestamp(),
-                            };
-
-                            match audit::insert_pending_approval(
-                                &db,
-                                decision_id,
-                                &action,
-                                &info,
-                                &snapshot.system_state,
-                            )
-                            .await
-                            {
-                                Ok(row_id) => {
-                                    let mut info = info;
-                                    info.id = row_id as u64;
-                                    st.pending.push(PendingApproval {
-                                        info,
-                                        action: action.clone(),
-                                        decision_id,
-                                        baseline: snapshot.system_state.clone(),
-                                    });
-                                    st.status = "PendingApproval".to_string();
-                                    pipe.broadcast_status(build_status(&st));
-                                }
-                                Err(e) => {
-                                    // Don't lose the finding — surface it as a problem.
-                                    error!("Failed to queue approval: {e}");
-                                    push_problem(
-                                        &mut st,
-                                        &problem.diagnosis,
-                                        problem.confidence,
-                                        &action_label,
-                                        true,
-                                        false,
-                                        Some(format!("could not queue for approval: {e}")),
-                                    );
-                                    pipe.broadcast_status(build_status(&st));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let tray_status = if st.paused {
-                    "Paused"
-                } else if !st.pending.is_empty() {
-                    "PendingApproval"
-                } else if !st.in_flight.is_empty() {
-                    "Executing"
-                } else if problems_found {
-                    "Warning"
-                } else {
-                    "Active"
-                }
-                .to_string();
-                if !st.paused {
-                    st.status = tray_status;
-                }
-                pipe.broadcast_status(build_status(&st));
+                    let _ = tx.send(outcome).await;
+                });
+                continue;
             }
         } => {}
         _ = shutdown => {
@@ -1543,5 +1618,71 @@ mod advisor_tests {
         no_tier.escalation_model = String::new();
         no_tier.escalation_effort = String::new();
         assert!(should_escalate(&decision(true, &[]), &no_tier, 0.0, 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod analysis_outcome_tests {
+    use super::*;
+    use models::ClaudeDecision;
+
+    fn snapshot() -> SignalSnapshot {
+        SignalSnapshot {
+            timestamp: chrono::Utc::now(),
+            event_log: vec![],
+            file_changes: vec![],
+            system_state: SystemState {
+                uptime_secs: 0,
+                cpu_usage_percent: 0.0,
+                memory_usage_percent: 0.0,
+                memory_available_gb: 0.0,
+                disk_usage_percent: 0.0,
+                disk_free_gb: 0.0,
+                running_services_count: 0,
+                failed_services: vec![],
+                network_interfaces: vec![],
+                network_errors: 0,
+                disk_health: String::new(),
+                windows_update_status: String::new(),
+                security: Default::default(),
+            },
+            decision_history: vec![],
+        }
+    }
+
+    /// The channel carries `Result<AnalysisSuccess, String>` straight from the
+    /// off-loop analysis task (see the analysis_done_rx arm) — both variants must
+    /// carry everything the arm destructures without a placeholder/dummy snapshot.
+    #[test]
+    fn analysis_success_round_trips_ok_and_err() {
+        let ok: Result<AnalysisSuccess, String> = Ok(AnalysisSuccess {
+            snapshot: snapshot(),
+            fingerprint: Some("F|x|1|0".to_string()),
+            decision: ClaudeDecision {
+                analysis: "looks fine".into(),
+                problems: vec![],
+                needs_deeper_analysis: false,
+            },
+            usage: vec![CallUsage::default()],
+            advisor: AdvisorStatus::default(),
+            advisor_spent_today: 1.23,
+            advisor_escalations_today: 2,
+        });
+        match ok {
+            Ok(s) => {
+                assert_eq!(s.fingerprint.as_deref(), Some("F|x|1|0"));
+                assert_eq!(s.decision.analysis, "looks fine");
+                assert_eq!(s.usage.len(), 1);
+                assert_eq!(s.advisor_escalations_today, 2);
+            }
+            Err(_) => panic!("expected Ok"),
+        }
+
+        let err: Result<AnalysisSuccess, String> =
+            Err("analysis exceeded 10m and was stopped".into());
+        match err {
+            Ok(_) => panic!("expected Err"),
+            Err(e) => assert!(e.contains("exceeded")),
+        }
     }
 }
