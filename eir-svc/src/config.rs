@@ -88,13 +88,12 @@ pub enum ApiProvider {
     /// OpenRouter (openrouter.ai) — OpenAI-compatible; supports free models.
     #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
-    /// Kilo Code gateway (api.kilo.ai) — OpenAI-compatible, 500+ models.
-    #[serde(rename = "kilocode", alias = "kilo")]
-    KiloCode,
     /// Kilo Code via the local `kilo` CLI — borrows the machine's logged-in
     /// Kilo session (Kilo Pass / Token-Plan addons / BYOK all flow through it
-    /// automatically); no API key to paste.
-    #[serde(rename = "kilo_cli")]
+    /// automatically); no API key to paste. The removed `kilocode` gateway
+    /// provider (and its `kilo` alias) now aliases here too — the closest
+    /// surviving equivalent for an old config.toml.
+    #[serde(rename = "kilo_cli", alias = "kilocode", alias = "kilo")]
     KiloCli,
 }
 
@@ -104,7 +103,6 @@ impl ApiProvider {
             ApiProvider::Anthropic => "anthropic",
             ApiProvider::ClaudeCli => "claude_cli",
             ApiProvider::OpenRouter => "openrouter",
-            ApiProvider::KiloCode => "kilocode",
             ApiProvider::KiloCli => "kilo_cli",
         }
     }
@@ -113,8 +111,7 @@ impl ApiProvider {
         match s {
             "claude_cli" => ApiProvider::ClaudeCli,
             "openrouter" | "open_router" => ApiProvider::OpenRouter,
-            "kilocode" | "kilo" => ApiProvider::KiloCode,
-            "kilo_cli" => ApiProvider::KiloCli,
+            "kilo_cli" | "kilocode" | "kilo" => ApiProvider::KiloCli,
             _ => ApiProvider::Anthropic,
         }
     }
@@ -128,9 +125,6 @@ pub struct ApiConfig {
     pub anthropic_api_key: Option<String>,
     /// OpenRouter API key (provider = "openrouter").
     pub openrouter_api_key: Option<String>,
-    /// Kilo Code gateway API key from app.kilo.ai (provider = "kilocode").
-    #[serde(default)]
-    pub kilocode_api_key: Option<String>,
     /// Model name. Empty = a provider default (OpenRouter: openrouter/free).
     #[serde(default)]
     pub model: String,
@@ -139,8 +133,8 @@ pub struct ApiConfig {
     pub update_check_model: String,
     /// Reasoning effort: low|medium|high|xhigh|max, empty = provider default.
     /// Maps to `output_config.effort` (Anthropic), `reasoning.effort`
-    /// (OpenRouter, Kilo Code), `--effort` (Claude CLI), or `--variant`
-    /// (kilo CLI); models without a reasoning dial may reject it.
+    /// (OpenRouter), `--effort` (Claude CLI), or `--variant` (kilo CLI);
+    /// models without a reasoning dial may reject it.
     #[serde(default)]
     pub effort: String,
     /// claude_cli: path to the claude binary. Blank = auto-detect
@@ -158,9 +152,8 @@ pub struct ApiConfig {
     pub kilo_cli_path: Option<String>,
     /// kilo_cli: the Windows user profile root (e.g. C:\Users\You) whose
     /// logged-in Kilo session the LocalSystem service borrows — the Kilo CLI
-    /// stores its session in that profile's `%APPDATA%\kilo\`. Blank =
-    /// auto-detect by scanning C:\Users for `%APPDATA%\kilo\auth.json` (and a
-    /// few fallbacks like `.kilocode\auth.json`, `.kilo\auth.json`).
+    /// stores its session in that profile's `.local\share\kilo\auth.json`.
+    /// Blank = auto-detect by scanning C:\Users for that file.
     #[serde(default)]
     pub kilo_cli_user_profile: Option<String>,
 }
@@ -222,7 +215,6 @@ impl Config {
             confidence_threshold: self.monitoring.confidence_threshold,
             openrouter_key_set: set(&self.api.openrouter_api_key),
             anthropic_key_set: set(&self.api.anthropic_api_key),
-            kilocode_key_set: set(&self.api.kilocode_api_key),
             kilo_cli_user_profile_set: self
                 .api
                 .kilo_cli_user_profile
@@ -250,7 +242,6 @@ impl Config {
         };
         keep(&mut self.api.openrouter_api_key, u.openrouter_api_key);
         keep(&mut self.api.anthropic_api_key, u.anthropic_api_key);
-        keep(&mut self.api.kilocode_api_key, u.kilocode_api_key);
         // The kilo_cli overrides are hint-style — even an explicitly blank
         // string clears the stored value, so the user can revert to
         // auto-detect from Settings.
@@ -330,7 +321,6 @@ audit_db = "./eir.db"
             effort: "High".into(),
             openrouter_api_key: Some("sk-or-test".into()),
             anthropic_api_key: None,
-            kilocode_api_key: None,
             kilo_cli_user_profile: None,
             kilo_cli_path: None,
             decision_interval_secs: 900,
@@ -427,22 +417,18 @@ audit_db = "./eir.db"
     }
 
     #[test]
-    fn kilocode_provider_round_trips() {
+    fn kilocode_provider_alias_loads_as_kilo_cli() {
+        // The removed API-key "kilocode" gateway provider aliases to the
+        // surviving subscription path (kilo_cli) rather than failing to parse.
         let mut cfg: Config = toml::from_str(SAMPLE).unwrap();
         cfg.apply_update(SettingsUpdate {
             provider: "kilocode".into(),
-            model: "anthropic/claude-sonnet-4.6".into(),
-            kilocode_api_key: Some("kilo-test-key".into()),
+            model: "kilo/anthropic/claude-sonnet-4.6".into(),
             ..Default::default()
         });
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let reparsed: Config = toml::from_str(&serialized).unwrap();
-        assert_eq!(reparsed.api.provider, ApiProvider::KiloCode);
-        assert_eq!(
-            reparsed.api.kilocode_api_key.as_deref(),
-            Some("kilo-test-key")
-        );
-        assert!(reparsed.to_ui_settings().kilocode_key_set);
+        assert_eq!(reparsed.api.provider, ApiProvider::KiloCli);
     }
 
     #[test]
@@ -450,7 +436,7 @@ audit_db = "./eir.db"
         let mut cfg: Config = toml::from_str(SAMPLE).unwrap();
         cfg.apply_update(SettingsUpdate {
             provider: "kilo_cli".into(),
-            model: "minimax/minimax-m3".into(),
+            model: "kilo/minimax/minimax-m3".into(),
             kilo_cli_user_profile: Some("C:\\Users\\You".into()),
             kilo_cli_path: Some("C:\\Users\\You\\AppData\\Roaming\\npm\\kilo.cmd".into()),
             ..Default::default()
@@ -458,7 +444,7 @@ audit_db = "./eir.db"
         let serialized = toml::to_string_pretty(&cfg).unwrap();
         let reparsed: Config = toml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.api.provider, ApiProvider::KiloCli);
-        assert_eq!(reparsed.api.model, "minimax/minimax-m3");
+        assert_eq!(reparsed.api.model, "kilo/minimax/minimax-m3");
         assert_eq!(
             reparsed.api.kilo_cli_user_profile.as_deref(),
             Some("C:\\Users\\You")

@@ -10,11 +10,9 @@ use tracing::{debug, info};
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1";
-/// Kilo Code AI gateway — OpenAI-compatible `/chat/completions`.
-const KILOCODE_BASE: &str = "https://api.kilo.ai/api/gateway";
 const MAX_TOKENS: u32 = 4096;
 
-// ── OpenAI-compatible request/response (OpenRouter, Kilo Code) ────────────────
+// ── OpenAI-compatible request/response (OpenRouter) ────────────────────────────
 
 #[derive(Serialize)]
 struct ChatMessage<'a> {
@@ -33,7 +31,7 @@ struct OpenAiRequest<'a> {
     /// OpenRouter-specific: request a final usage chunk with cost.
     #[serde(skip_serializing_if = "Option::is_none")]
     usage: Option<UsageInclude>,
-    /// Reasoning effort (OpenRouter / Kilo Code reasoning models).
+    /// Reasoning effort (OpenRouter reasoning models).
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<Reasoning<'a>>,
 }
@@ -83,14 +81,6 @@ struct OpenAiChoice {
 #[derive(Deserialize)]
 struct OpenAiDelta {
     content: Option<String>,
-}
-
-/// Which OpenAI-compatible backend a call targets (they differ only in the
-/// extra headers/fields they want).
-#[derive(Clone, Copy, PartialEq)]
-enum OpenAiFlavor {
-    OpenRouter,
-    KiloCode,
 }
 
 // ── Claude CLI JSON envelope (claude --print --output-format json) ────────────
@@ -160,10 +150,6 @@ enum AiClientConfig {
         api_key: String,
         model: String,
     },
-    KiloCode {
-        api_key: String,
-        model: String,
-    },
     /// Kilo Code via the local `kilo` CLI — borrows the machine's logged-in
     /// Kilo session (Kilo Pass / Token-Plan addons / BYOK all flow through
     /// it transparently); no API key to paste.
@@ -228,30 +214,16 @@ impl AiClient {
                 };
                 AiClientConfig::OpenRouter { api_key, model }
             }
-            ApiProvider::KiloCode => {
-                let api_key = cfg
-                    .kilocode_api_key
-                    .clone()
-                    .filter(|k| !k.trim().is_empty())
-                    .context("[api] kilocode_api_key is required for provider = \"kilocode\" — create one at app.kilo.ai")?;
-                if cfg.model.trim().is_empty() {
-                    bail!("[api] a model is required for provider = \"kilocode\" (e.g. anthropic/claude-sonnet-4.6)");
-                }
-                AiClientConfig::KiloCode {
-                    api_key,
-                    model: cfg.model.clone(),
-                }
-            }
             ApiProvider::KiloCli => {
                 // No API key — the kilo CLI carries the user's logged-in Kilo
                 // session (Kilo Pass / Token-Plan addons / BYOK all flow
                 // through it transparently). Profile and binary are
                 // auto-detected when not configured.
-                let user_profile =
-                    resolve_kilo_cli_profile(cfg.kilo_cli_user_profile.as_deref());
-                let binary = resolve_kilo_cli_binary(cfg.kilo_cli_path.as_deref());
+                let user_profile = resolve_kilo_cli_profile(cfg.kilo_cli_user_profile.as_deref());
+                let binary =
+                    resolve_kilo_cli_binary(cfg.kilo_cli_path.as_deref(), user_profile.as_deref());
                 if cfg.model.trim().is_empty() {
-                    bail!("[api] a model is required for provider = \"kilo_cli\" (e.g. minimax/minimax-m3 or anthropic/claude-sonnet-4.6)");
+                    bail!("[api] a model is required for provider = \"kilo_cli\" (e.g. kilo/minimax/minimax-m2.5 or anthropic/claude-sonnet-4.6)");
                 }
                 info!(
                     binary = %binary,
@@ -321,27 +293,8 @@ impl AiClient {
             }
             AiClientConfig::OpenRouter { api_key, model } => {
                 let m = model_ov.unwrap_or(model);
-                self.call_openai_style(
-                    OPENROUTER_BASE,
-                    api_key,
-                    m,
-                    effort,
-                    &prompt,
-                    OpenAiFlavor::OpenRouter,
-                )
-                .await?
-            }
-            AiClientConfig::KiloCode { api_key, model } => {
-                let m = model_ov.unwrap_or(model);
-                self.call_openai_style(
-                    KILOCODE_BASE,
-                    api_key,
-                    m,
-                    effort,
-                    &prompt,
-                    OpenAiFlavor::KiloCode,
-                )
-                .await?
+                self.call_openai_style(OPENROUTER_BASE, api_key, m, effort, &prompt)
+                    .await?
             }
             AiClientConfig::KiloCli {
                 binary,
@@ -502,7 +455,6 @@ impl AiClient {
         model: &str,
         effort: &str,
         prompt: &str,
-        flavor: OpenAiFlavor,
     ) -> Result<(String, Option<CallUsage>)> {
         let url = format!("{base_url}/chat/completions");
         let body = OpenAiRequest {
@@ -517,23 +469,18 @@ impl AiClient {
             stream_options: Some(StreamOptions {
                 include_usage: true,
             }),
-            usage: (flavor == OpenAiFlavor::OpenRouter).then_some(UsageInclude { include: true }),
+            usage: Some(UsageInclude { include: true }),
             reasoning: openai_effort(effort).map(|e| Reasoning { effort: e }),
         };
 
-        let mut req = self
+        let resp = self
             .http
             .post(&url)
             .header("Authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json");
-        if flavor == OpenAiFlavor::OpenRouter {
+            .header("content-type", "application/json")
             // OpenRouter app attribution (optional but recommended).
-            req = req
-                .header("HTTP-Referer", "https://github.com/Swatto86/eir")
-                .header("X-Title", "Eir");
-        }
-
-        let resp = req
+            .header("HTTP-Referer", "https://github.com/Swatto86/eir")
+            .header("X-Title", "Eir")
             .json(&body)
             .send()
             .await
@@ -746,7 +693,10 @@ impl AiClient {
                 .env("HOMEPATH", homepath)
                 .env("HOMEDRIVE", "C:")
                 .env("APPDATA", &appdata)
-                .env("LOCALAPPDATA", &localappdata);
+                .env("LOCALAPPDATA", &localappdata)
+                // The kilo CLI is a Bun-compiled binary; Bun tooling can
+                // consult HOME on Windows for some path resolution.
+                .env("HOME", profile);
         }
 
         cmd.stdin(std::process::Stdio::piped())
@@ -780,11 +730,7 @@ impl AiClient {
             // error. Surface stderr so the user can diagnose (e.g. "Not
             // authenticated — run `kilo` once interactively to log in").
             let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "kilo CLI exited with {}: {}",
-                output.status,
-                stderr.trim()
-            );
+            bail!("kilo CLI exited with {}: {}", output.status, stderr.trim());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -801,9 +747,8 @@ impl AiClient {
 // A general "ask the model this prompt, with live web search where available"
 // entry point, used by the updater to resolve an official installer URL and to
 // read failure errors. OpenRouter uses its `web` plugin; Anthropic uses the
-// native web_search server tool. The Kilo gateway has no verified web-search
-// path, so it answers from model knowledge — the updater's plan validator and
-// signature gates still bound anything it returns.
+// native web_search server tool; the Kilo CLI does its own web search as part
+// of its agent loop.
 
 #[derive(Serialize)]
 struct WebPlugin {
@@ -886,19 +831,6 @@ impl AiClient {
                 self.call_claude_cli(binary, &m, &self.effort, user_profile.as_deref(), prompt)
                     .await
             }
-            AiClientConfig::KiloCode { api_key, model } => {
-                // No verified web plugin on the Kilo gateway — plain completion.
-                let m = if ov.is_empty() { model.as_str() } else { ov };
-                self.call_openai_style(
-                    KILOCODE_BASE,
-                    api_key,
-                    m,
-                    "",
-                    prompt,
-                    OpenAiFlavor::KiloCode,
-                )
-                .await
-            }
             AiClientConfig::KiloCli {
                 binary,
                 model,
@@ -939,27 +871,8 @@ impl AiClient {
             }
             AiClientConfig::OpenRouter { api_key, model } => {
                 let m = if ov.is_empty() { model.as_str() } else { ov };
-                self.call_openai_style(
-                    OPENROUTER_BASE,
-                    api_key,
-                    m,
-                    "",
-                    prompt,
-                    OpenAiFlavor::OpenRouter,
-                )
-                .await
-            }
-            AiClientConfig::KiloCode { api_key, model } => {
-                let m = if ov.is_empty() { model.as_str() } else { ov };
-                self.call_openai_style(
-                    KILOCODE_BASE,
-                    api_key,
-                    m,
-                    "",
-                    prompt,
-                    OpenAiFlavor::KiloCode,
-                )
-                .await
+                self.call_openai_style(OPENROUTER_BASE, api_key, m, "", prompt)
+                    .await
             }
             AiClientConfig::KiloCli {
                 binary,
@@ -1202,40 +1115,56 @@ fn resolve_claude_binary(configured: Option<&str>, user_profile: Option<&str>) -
 
 /// Resolve the Windows user profile whose logged-in Kilo session the service
 /// should borrow. Uses the configured value when set, otherwise scans
-/// `C:\Users` for the first profile holding a Kilo CLI session file.
-/// Kilo (a fork of OpenCode) writes its session to `%APPDATA%\kilo\auth.json`
-/// on Windows; the legacy names (`kilocode`, `opencode`) are checked too so
-/// users upgrading from an older beta aren't penalised.
+/// `C:\Users` for the first profile holding the Kilo CLI's session file at
+/// `.local\share\kilo\auth.json` — a single JSON object keyed by provider
+/// name (`"kilo": {"type":"oauth",...}` for the Kilo Pass/Token-Plan login,
+/// plus any BYOK provider entries added via `kilo auth login`, e.g.
+/// `"openrouter": {"type":"api",...}`).
 fn resolve_kilo_cli_profile(configured: Option<&str>) -> Option<String> {
     if let Some(p) = configured.filter(|p| is_real(p)) {
         return Some(p.trim().to_string());
     }
     let users = std::fs::read_dir("C:\\Users").ok()?;
-    let candidates = ["kilo", "kilocode", "opencode"];
     for entry in users.flatten() {
         let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let appdata = dir.join("AppData").join("Roaming");
-        for name in candidates {
-            // The `auth.json` is the canonical session file; `config.json`
-            // exists too but doesn't prove the user is logged in.
-            if appdata.join(name).join("auth.json").is_file() {
-                return Some(dir.to_string_lossy().into_owned());
-            }
+        if dir
+            .join(".local")
+            .join("share")
+            .join("kilo")
+            .join("auth.json")
+            .is_file()
+        {
+            return Some(dir.to_string_lossy().into_owned());
         }
     }
     None
 }
 
 /// Resolve the path to the `kilo` binary. Uses the configured value when set,
-/// otherwise falls back to `kilo` on PATH. No known canonical install
-/// location on Windows (npm's global `kilo.cmd` lives under the user's
-/// roaming npm folder, which is already on PATH after install).
-fn resolve_kilo_cli_binary(configured: Option<&str>) -> String {
+/// otherwise tries the platform-specific executable `npm install -g
+/// @kilocode/cli` places under the resolved user profile — Windows installs
+/// resolve to either the `cli-windows-x64` or `-baseline` sibling depending
+/// on CPU feature detection at install time, so both are tried — then the
+/// npm shim (`kilo.cmd`, a per-user PATH entry LocalSystem doesn't have),
+/// and finally falls back to bare `"kilo"` (PATH-reliant, for interactive/
+/// non-service use).
+fn resolve_kilo_cli_binary(configured: Option<&str>, user_profile: Option<&str>) -> String {
     if let Some(p) = configured.filter(|p| is_real(p)) {
         return p.trim().to_string();
+    }
+    if let Some(up) = user_profile {
+        for variant in ["cli-windows-x64", "cli-windows-x64-baseline"] {
+            let candidate = format!(
+                "{up}\\AppData\\Roaming\\npm\\node_modules\\@kilocode\\cli\\node_modules\\@kilocode\\{variant}\\bin\\kilo.exe"
+            );
+            if std::path::Path::new(&candidate).is_file() {
+                return candidate;
+            }
+        }
+        let shim = format!("{up}\\AppData\\Roaming\\npm\\kilo.cmd");
+        if std::path::Path::new(&shim).is_file() {
+            return shim;
+        }
     }
     "kilo".into()
 }
@@ -1314,12 +1243,15 @@ fn extract_json_object(s: &str) -> &str {
     }
 }
 
-/// Parse the kilo CLI's `--format json` NDJSON output. The CLI emits a stream
-/// of events; we concatenate `text` events into the final assistant reply
-/// and keep the latest `step_finish` event's token/cost accounting. Unknown
-/// event types and individual parse failures are skipped — the wire format
-/// is still evolving upstream and we don't want a single bad event to sink
-/// the whole response.
+/// Parse the kilo CLI's `--format json` NDJSON output. The CLI nests each
+/// event's actual payload under a `part` object (e.g.
+/// `{"type":"text","part":{"type":"text","text":"..."}}`); we read fields
+/// there first and fall back to the top-level shape for older/alternate
+/// event variants. We concatenate `text` events into the final assistant
+/// reply and keep the latest `step_finish` event's token/cost accounting.
+/// Unknown event types and individual parse failures are skipped — the wire
+/// format is still evolving upstream and we don't want a single bad event to
+/// sink the whole response.
 fn parse_kilo_ndjson(stdout: &str) -> Result<(String, Option<CallUsage>)> {
     let mut text = String::new();
     let mut last_step: Option<Value> = None;
@@ -1333,7 +1265,8 @@ fn parse_kilo_ndjson(stdout: &str) -> Result<(String, Option<CallUsage>)> {
         };
         match ev["type"].as_str() {
             Some("text") => {
-                if let Some(t) = ev["text"].as_str() {
+                let t = ev["part"]["text"].as_str().or_else(|| ev["text"].as_str());
+                if let Some(t) = t {
                     text.push_str(t);
                 }
             }
@@ -1345,27 +1278,37 @@ fn parse_kilo_ndjson(stdout: &str) -> Result<(String, Option<CallUsage>)> {
         }
     }
     let usage = last_step.map(|s| {
+        // Prefer the part-nested tokens/cost the real CLI emits; fall back
+        // to the top-level shape (older/alternate event variants).
+        let part_tokens = &s["part"]["tokens"];
+        let tokens = if part_tokens.is_null() {
+            &s["tokens"]
+        } else {
+            part_tokens
+        };
         // Kilo's wire format puts tokens under `tokens.{input,output,cache.read,cache.write}`;
         // be permissive — older betas used `tokens.{input_tokens,output_tokens}`.
-        let tokens = &s["tokens"];
-        let input = tokens["input"].as_u64().unwrap_or_else(|| {
-            tokens["input_tokens"].as_u64().unwrap_or(0)
-        });
-        let output = tokens["output"].as_u64().unwrap_or_else(|| {
-            tokens["output_tokens"].as_u64().unwrap_or(0)
-        });
-        let cache_read = tokens["cache"]["read"].as_u64().unwrap_or_else(|| {
-            tokens["cache_read_input_tokens"].as_u64().unwrap_or(0)
-        });
-        let cache_write = tokens["cache"]["write"].as_u64().unwrap_or_else(|| {
-            tokens["cache_creation_input_tokens"].as_u64().unwrap_or(0)
-        });
+        let input = tokens["input"]
+            .as_u64()
+            .unwrap_or_else(|| tokens["input_tokens"].as_u64().unwrap_or(0));
+        let output = tokens["output"]
+            .as_u64()
+            .unwrap_or_else(|| tokens["output_tokens"].as_u64().unwrap_or(0));
+        let cache_read = tokens["cache"]["read"]
+            .as_u64()
+            .unwrap_or_else(|| tokens["cache_read_input_tokens"].as_u64().unwrap_or(0));
+        let cache_write = tokens["cache"]["write"]
+            .as_u64()
+            .unwrap_or_else(|| tokens["cache_creation_input_tokens"].as_u64().unwrap_or(0));
+        let cost = s["part"]["cost"]
+            .as_f64()
+            .unwrap_or_else(|| s["cost"].as_f64().unwrap_or(0.0));
         CallUsage {
             input_tokens: input,
             output_tokens: output,
             cache_creation: cache_write,
             cache_read,
-            cost_usd: s["cost"].as_f64().unwrap_or(0.0),
+            cost_usd: cost,
         }
     });
     Ok((text, usage))
@@ -1493,16 +1436,17 @@ mod tests {
 
     #[test]
     fn kilo_ndjson_collects_text_and_keeps_last_step_usage() {
-        // A realistic stream: noise events, text chunks, step_finish with
-        // tokens + cost, then session_end. Text must concatenate in order;
-        // usage must come from the LAST step_finish.
+        // A realistic stream matching the real CLI's part-nested wire format:
+        // noise events, text chunks, step_finish with tokens + cost under
+        // "part", then session_end. Text must concatenate in order; usage
+        // must come from the LAST step_finish.
         let stream = r#"
-{"type":"step_start","sessionID":"abc"}
-{"type":"text","text":"hello "}
-{"type":"text","text":"world"}
-{"type":"step_finish","cost":0.001,"tokens":{"input":100,"output":20,"cache":{"read":0,"write":50}}}
-{"type":"text","text":"!"}
-{"type":"step_finish","cost":0.002,"tokens":{"input":150,"output":25,"cache":{"read":10,"write":50}}}
+{"type":"step_start","sessionID":"abc","part":{"type":"step-start"}}
+{"type":"text","part":{"type":"text","text":"hello "}}
+{"type":"text","part":{"type":"text","text":"world"}}
+{"type":"step_finish","part":{"type":"step-finish","cost":0.001,"tokens":{"input":100,"output":20,"cache":{"read":0,"write":50}}}}
+{"type":"text","part":{"type":"text","text":"!"}}
+{"type":"step_finish","part":{"type":"step-finish","cost":0.002,"tokens":{"input":150,"output":25,"cache":{"read":10,"write":50}}}}
 {"type":"session_end"}
 "#;
         let (text, usage) = parse_kilo_ndjson(stream).unwrap();

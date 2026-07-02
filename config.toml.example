@@ -1,5 +1,5 @@
 [api]
-# Four providers: "openrouter", "claude_cli", "anthropic", "kilocode".
+# Four providers: "openrouter", "claude_cli", "anthropic", "kilo_cli".
 # Everything here is editable in the app's Settings panel — no need to touch
 # this file after install.
 
@@ -18,8 +18,8 @@ model = "openrouter/free" # auto-routes to a free model; or pin one from https:/
 update_check_model = ""
 
 # Reasoning effort: low|medium|high|xhigh|max (blank = provider default).
-# Anthropic → output_config.effort; OpenRouter/Kilo → reasoning.effort;
-# Claude CLI → --effort.
+# Anthropic → output_config.effort; OpenRouter → reasoning.effort;
+# Claude CLI → --effort; Kilo CLI → --variant.
 effort = ""
 
 # ── Option B: Claude via your subscription (Claude CLI — no API key) ──────────
@@ -40,17 +40,7 @@ effort = ""
 # anthropic_api_key = "sk-ant-..."
 # model = "claude-opus-4-8"   # or claude-sonnet-4-6 / claude-haiku-4-5
 
-# ── Option D: Kilo Code gateway ───────────────────────────────────────────────
-# One key for 500+ models via api.kilo.ai. Create a key at https://app.kilo.ai
-# Models use `provider/model` format. The same key works for hosted-in-Kilo
-# models and for BYOK routing of upstream provider keys you add in app.kilo.ai.
-#
-# provider = "kilocode"
-# kilocode_api_key = "..."
-# model = "anthropic/claude-sonnet-4.6"   # or any provider/model id from https://kilo.ai/models
-# model = "minimax/minimax-m3"            # Minimax coding plan (BYOK; key works either way)
-
-# ── Option E: Kilo Code CLI — your Kilo Pass / Token-Plan subscription ─────────
+# ── Option D: Kilo Code CLI — your Kilo Pass / Token-Plan subscription ─────────
 # No API key. Borrows the machine's logged-in `kilo` session, so Kilo Pass
 # credits, Token-Plan addons (e.g. "MiniMax Token Plan Plus"), and BYOK all
 # flow through transparently — exactly like the Claude CLI borrows your
@@ -58,10 +48,14 @@ effort = ""
 #
 # Install: `npm install -g @kilocode/cli`, then run `kilo` once interactively
 # to sign in. The service (running as LocalSystem) auto-detects your Windows
-# profile by scanning C:\Users for %APPDATA%\kilo\auth.json.
+# profile by scanning C:\Users for .local\share\kilo\auth.json.
+#
+# The "kilo/" model prefix is what routes a call through your subscription/
+# Token-Plan/BYOK; a bare provider/model id instead requires your own
+# credentials with that upstream provider.
 #
 # provider = "kilo_cli"
-# model = "minimax/minimax-m3"                          # any provider/model id from https://kilo.ai/models
+# model = "kilo/minimax/minimax-m2.5"                   # "kilo/" + any provider/model id from https://kilo.ai/models
 # kilo_cli_user_profile = "C:\\Users\\You"              # optional — blank = auto-detect
 # kilo_cli_path = "C:\\Users\\You\\AppData\\Roaming\\npm\\kilo.cmd"  # optional — blank = on PATH
 

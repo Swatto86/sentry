@@ -185,10 +185,6 @@ pub struct UiSettings {
     pub confidence_threshold: f32,
     pub openrouter_key_set: bool,
     pub anthropic_key_set: bool,
-    /// Whether a Kilo Code gateway API key is configured. `#[serde(default)]`
-    /// keeps an older payload (without this field) decodable.
-    #[serde(default)]
-    pub kilocode_key_set: bool,
     /// Whether a kilo_cli user-profile override is configured (the Windows
     /// profile whose logged-in Kilo session the LocalSystem service borrows).
     /// `#[serde(default)]` keeps an older payload decodable.
@@ -218,12 +214,9 @@ pub struct SettingsUpdate {
     pub effort: String,
     pub openrouter_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
-    /// Kilo Code gateway API key (app.kilo.ai). `None` = unchanged.
-    #[serde(default)]
-    pub kilocode_api_key: Option<String>,
     /// kilo_cli: the Windows user profile whose logged-in Kilo session the
     /// LocalSystem service borrows (e.g. `C:\Users\You`). Blank = auto-detect
-    /// by scanning `C:\Users` for `%APPDATA%\kilo\auth.json`. `None` = unchanged.
+    /// by scanning `C:\Users` for `.local\share\kilo\auth.json`. `None` = unchanged.
     #[serde(default)]
     pub kilo_cli_user_profile: Option<String>,
     /// kilo_cli: path to the `kilo` binary. Blank = auto-detect on PATH.

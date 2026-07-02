@@ -125,7 +125,6 @@ function providerName(p) {
     openrouter: 'OpenRouter',
     claude_cli: 'Claude CLI',
     anthropic: 'Claude (Anthropic)',
-    kilocode: 'Kilo Code',
     kilo_cli: 'Kilo CLI',
   })[p] || p || '';
 }
@@ -553,8 +552,7 @@ const PROVIDER_HINTS = {
   openrouter: 'One key, hundreds of models — free ones included. Blank model auto-routes to a free model. Key: openrouter.ai/keys',
   claude_cli: 'Uses your Claude subscription via the logged-in claude CLI — no API key. Auto-detects your profile and claude.exe. Blank model = the CLI default; aliases like haiku/sonnet/opus work.',
   anthropic: 'Claude direct from Anthropic. A model is required (e.g. claude-opus-4-8, claude-haiku-4-5). Key: console.anthropic.com',
-  kilocode: 'Kilo Code AI gateway — 500+ models in provider/model format (e.g. anthropic/claude-sonnet-4.6). Key: app.kilo.ai',
-  kilo_cli: 'Kilo CLI (your Kilo subscription) — no API key; borrows your logged-in Kilo session. Install with `npm install -g @kilocode/cli`, then run `kilo` once to sign in. Model in provider/model format, e.g. minimax/minimax-m3.',
+  kilo_cli: 'Kilo CLI (your Kilo subscription) — no API key; borrows your logged-in Kilo session. Install with `npm install -g @kilocode/cli`, then run `kilo` once to sign in. Model needs the kilo/ prefix to route through your subscription/BYOK, e.g. kilo/minimax/minimax-m2.5.',
 };
 
 function updateProviderHint() {
@@ -613,8 +611,6 @@ function fillSettings() {
     s.openrouter_key_set ? '•••••• set — blank keeps it' : 'not set';
   document.getElementById('set-an-key').placeholder =
     s.anthropic_key_set ? '•••••• set — blank keeps it' : 'not set';
-  document.getElementById('set-kilo-key').placeholder =
-    s.kilocode_key_set ? '•••••• set — blank keeps it' : 'not set';
   document.getElementById('set-kilo-profile').placeholder =
     s.kilo_cli_user_profile_set ? '•••••• set — blank clears it' : 'C:\\Users\\You  (blank = auto-detect)';
   document.getElementById('set-kilo-path').placeholder =
@@ -627,7 +623,6 @@ async function saveSettings() {
   const splitList = (v) => v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
   const orKey = document.getElementById('set-or-key').value.trim();
   const anKey = document.getElementById('set-an-key').value.trim();
-  const kiloKey = document.getElementById('set-kilo-key').value.trim();
   const kiloProfile = document.getElementById('set-kilo-profile').value.trim();
   const kiloPath = document.getElementById('set-kilo-path').value.trim();
   const settings = {
@@ -637,7 +632,6 @@ async function saveSettings() {
     update_check_model: document.getElementById('set-upd-model').value.trim(),
     openrouter_api_key: orKey || null,
     anthropic_api_key: anKey || null,
-    kilocode_api_key: kiloKey || null,
     kilo_cli_user_profile: kiloProfile,
     kilo_cli_path: kiloPath,
     confidence_threshold: (parseInt(document.getElementById('set-conf').value, 10) || 80) / 100,
@@ -663,19 +657,9 @@ async function saveSettings() {
       return;
     }
   }
-  if (settings.provider === 'kilocode') {
-    if (!kiloKey && !s.kilocode_key_set) {
-      st.textContent = 'Kilo Code needs an API key — create one at app.kilo.ai, then Save.';
-      return;
-    }
-    if (!settings.model) {
-      st.textContent = 'Kilo Code needs a model — e.g. anthropic/claude-sonnet-4.6';
-      return;
-    }
-  }
   if (settings.provider === 'kilo_cli') {
     if (!settings.model) {
-      st.textContent = 'Kilo CLI needs a model — e.g. minimax/minimax-m3 or anthropic/claude-sonnet-4.6';
+      st.textContent = 'Kilo CLI needs a model — e.g. kilo/minimax/minimax-m2.5 or anthropic/claude-sonnet-4.6';
       return;
     }
   }
@@ -686,7 +670,6 @@ async function saveSettings() {
     st.textContent = 'Saved. Service restarting — it will reconnect shortly.';
     document.getElementById('set-or-key').value = '';
     document.getElementById('set-an-key').value = '';
-    document.getElementById('set-kilo-key').value = '';
   document.getElementById('set-kilo-profile').value = '';
   document.getElementById('set-kilo-path').value = '';
   } catch (e) {
