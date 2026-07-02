@@ -91,6 +91,11 @@ pub enum ApiProvider {
     /// Kilo Code gateway (api.kilo.ai) — OpenAI-compatible, 500+ models.
     #[serde(rename = "kilocode", alias = "kilo")]
     KiloCode,
+    /// Kilo Code via the local `kilo` CLI — borrows the machine's logged-in
+    /// Kilo session (Kilo Pass / Token-Plan addons / BYOK all flow through it
+    /// automatically); no API key to paste.
+    #[serde(rename = "kilo_cli")]
+    KiloCli,
 }
 
 impl ApiProvider {
@@ -100,6 +105,7 @@ impl ApiProvider {
             ApiProvider::ClaudeCli => "claude_cli",
             ApiProvider::OpenRouter => "openrouter",
             ApiProvider::KiloCode => "kilocode",
+            ApiProvider::KiloCli => "kilo_cli",
         }
     }
 
@@ -108,6 +114,7 @@ impl ApiProvider {
             "claude_cli" => ApiProvider::ClaudeCli,
             "openrouter" | "open_router" => ApiProvider::OpenRouter,
             "kilocode" | "kilo" => ApiProvider::KiloCode,
+            "kilo_cli" => ApiProvider::KiloCli,
             _ => ApiProvider::Anthropic,
         }
     }
@@ -132,8 +139,8 @@ pub struct ApiConfig {
     pub update_check_model: String,
     /// Reasoning effort: low|medium|high|xhigh|max, empty = provider default.
     /// Maps to `output_config.effort` (Anthropic), `reasoning.effort`
-    /// (OpenRouter, Kilo Code), or `--effort` (Claude CLI); models without a
-    /// reasoning dial may reject it.
+    /// (OpenRouter, Kilo Code), `--effort` (Claude CLI), or `--variant`
+    /// (kilo CLI); models without a reasoning dial may reject it.
     #[serde(default)]
     pub effort: String,
     /// claude_cli: path to the claude binary. Blank = auto-detect
@@ -145,6 +152,17 @@ pub struct ApiConfig {
     /// auto-detect by scanning C:\Users for `.claude\.credentials.json`.
     #[serde(default)]
     pub user_profile: Option<String>,
+    /// kilo_cli: path to the `kilo` binary (from `npm install -g @kilocode/cli`
+    /// or the standalone Windows zip). Blank = "kilo" on PATH.
+    #[serde(default)]
+    pub kilo_cli_path: Option<String>,
+    /// kilo_cli: the Windows user profile root (e.g. C:\Users\You) whose
+    /// logged-in Kilo session the LocalSystem service borrows — the Kilo CLI
+    /// stores its session in that profile's `%APPDATA%\kilo\`. Blank =
+    /// auto-detect by scanning C:\Users for `%APPDATA%\kilo\auth.json` (and a
+    /// few fallbacks like `.kilocode\auth.json`, `.kilo\auth.json`).
+    #[serde(default)]
+    pub kilo_cli_user_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -167,6 +185,14 @@ fn default_confidence() -> f32 {
 /// Accept only the known reasoning-effort levels; anything else (incl. blank)
 /// becomes empty, i.e. the provider default. Keeps an invalid value from being
 /// sent straight to a provider API.
+/// Treats the shipped example config placeholder `YourName` as "not set", so
+/// the UI's "configured" dot doesn't lie when a user copies the template and
+/// forgets to fill in their own Windows profile / binary path.
+fn is_real(value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && !v.contains("YourName")
+}
+
 fn normalize_effort(value: &str) -> String {
     match value.trim().to_lowercase().as_str() {
         e @ ("low" | "medium" | "high" | "xhigh" | "max") => e.to_string(),
@@ -197,6 +223,12 @@ impl Config {
             openrouter_key_set: set(&self.api.openrouter_api_key),
             anthropic_key_set: set(&self.api.anthropic_api_key),
             kilocode_key_set: set(&self.api.kilocode_api_key),
+            kilo_cli_user_profile_set: self
+                .api
+                .kilo_cli_user_profile
+                .as_deref()
+                .is_some_and(is_real),
+            kilo_cli_path_set: self.api.kilo_cli_path.as_deref().is_some_and(is_real),
             // Deprecated wire fields (see eir_proto::UiSettings).
             base_url: String::new(),
             api_key_set: false,
@@ -219,6 +251,17 @@ impl Config {
         keep(&mut self.api.openrouter_api_key, u.openrouter_api_key);
         keep(&mut self.api.anthropic_api_key, u.anthropic_api_key);
         keep(&mut self.api.kilocode_api_key, u.kilocode_api_key);
+        // The kilo_cli overrides are hint-style — even an explicitly blank
+        // string clears the stored value, so the user can revert to
+        // auto-detect from Settings.
+        self.api.kilo_cli_user_profile = u
+            .kilo_cli_user_profile
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self.api.kilo_cli_path = u
+            .kilo_cli_path
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         self.monitoring.decision_interval_secs = u.decision_interval_secs.max(10);
         self.monitoring.event_log_poll_interval_secs = u.event_log_poll_interval_secs.max(5);
         self.monitoring.wmi_poll_interval_secs = u.wmi_poll_interval_secs.max(30);
@@ -288,6 +331,8 @@ audit_db = "./eir.db"
             openrouter_api_key: Some("sk-or-test".into()),
             anthropic_api_key: None,
             kilocode_api_key: None,
+            kilo_cli_user_profile: None,
+            kilo_cli_path: None,
             decision_interval_secs: 900,
             event_log_poll_interval_secs: 45,
             wmi_poll_interval_secs: 300,
@@ -398,5 +443,50 @@ audit_db = "./eir.db"
             Some("kilo-test-key")
         );
         assert!(reparsed.to_ui_settings().kilocode_key_set);
+    }
+
+    #[test]
+    fn kilo_cli_provider_round_trips_with_overrides() {
+        let mut cfg: Config = toml::from_str(SAMPLE).unwrap();
+        cfg.apply_update(SettingsUpdate {
+            provider: "kilo_cli".into(),
+            model: "minimax/minimax-m3".into(),
+            kilo_cli_user_profile: Some("C:\\Users\\You".into()),
+            kilo_cli_path: Some("C:\\Users\\You\\AppData\\Roaming\\npm\\kilo.cmd".into()),
+            ..Default::default()
+        });
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.api.provider, ApiProvider::KiloCli);
+        assert_eq!(reparsed.api.model, "minimax/minimax-m3");
+        assert_eq!(
+            reparsed.api.kilo_cli_user_profile.as_deref(),
+            Some("C:\\Users\\You")
+        );
+        assert_eq!(
+            reparsed.api.kilo_cli_path.as_deref(),
+            Some("C:\\Users\\You\\AppData\\Roaming\\npm\\kilo.cmd")
+        );
+        let view = reparsed.to_ui_settings();
+        assert!(view.kilo_cli_user_profile_set);
+        assert!(view.kilo_cli_path_set);
+    }
+
+    #[test]
+    fn kilo_cli_blank_overrides_clear_stored_values() {
+        // The Settings panel treats blank kilo_cli fields as "auto-detect",
+        // not "keep current", so an explicit blank must overwrite the stored
+        // value (parity with the user expectation when they uncheck a box).
+        let mut cfg: Config = toml::from_str(SAMPLE).unwrap();
+        cfg.api.kilo_cli_user_profile = Some("C:\\Users\\Old".into());
+        cfg.api.kilo_cli_path = Some("C:\\old\\kilo.cmd".into());
+        cfg.apply_update(SettingsUpdate {
+            provider: "kilo_cli".into(),
+            kilo_cli_user_profile: Some(String::new()),
+            kilo_cli_path: Some(String::new()),
+            ..Default::default()
+        });
+        assert!(cfg.api.kilo_cli_user_profile.is_none());
+        assert!(cfg.api.kilo_cli_path.is_none());
     }
 }

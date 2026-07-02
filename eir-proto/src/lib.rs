@@ -189,6 +189,15 @@ pub struct UiSettings {
     /// keeps an older payload (without this field) decodable.
     #[serde(default)]
     pub kilocode_key_set: bool,
+    /// Whether a kilo_cli user-profile override is configured (the Windows
+    /// profile whose logged-in Kilo session the LocalSystem service borrows).
+    /// `#[serde(default)]` keeps an older payload decodable.
+    #[serde(default)]
+    pub kilo_cli_user_profile_set: bool,
+    /// Whether a kilo_cli binary path override is configured. Same default
+    /// rationale as `kilo_cli_user_profile_set`.
+    #[serde(default)]
+    pub kilo_cli_path_set: bool,
     /// Deprecated (pre-0.17 OpenAI-compatible provider). Always empty/false —
     /// kept on the wire so a not-yet-updated tray app, which requires these
     /// fields, can still decode the payload during an update's skew window.
@@ -212,6 +221,15 @@ pub struct SettingsUpdate {
     /// Kilo Code gateway API key (app.kilo.ai). `None` = unchanged.
     #[serde(default)]
     pub kilocode_api_key: Option<String>,
+    /// kilo_cli: the Windows user profile whose logged-in Kilo session the
+    /// LocalSystem service borrows (e.g. `C:\Users\You`). Blank = auto-detect
+    /// by scanning `C:\Users` for `%APPDATA%\kilo\auth.json`. `None` = unchanged.
+    #[serde(default)]
+    pub kilo_cli_user_profile: Option<String>,
+    /// kilo_cli: path to the `kilo` binary. Blank = auto-detect on PATH.
+    /// `None` = unchanged.
+    #[serde(default)]
+    pub kilo_cli_path: Option<String>,
     pub decision_interval_secs: u64,
     pub event_log_poll_interval_secs: u64,
     pub wmi_poll_interval_secs: u64,

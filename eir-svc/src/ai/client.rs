@@ -164,6 +164,14 @@ enum AiClientConfig {
         api_key: String,
         model: String,
     },
+    /// Kilo Code via the local `kilo` CLI — borrows the machine's logged-in
+    /// Kilo session (Kilo Pass / Token-Plan addons / BYOK all flow through
+    /// it transparently); no API key to paste.
+    KiloCli {
+        binary: String,
+        model: String,
+        user_profile: Option<String>,
+    },
 }
 
 impl AiClient {
@@ -232,6 +240,28 @@ impl AiClient {
                 AiClientConfig::KiloCode {
                     api_key,
                     model: cfg.model.clone(),
+                }
+            }
+            ApiProvider::KiloCli => {
+                // No API key — the kilo CLI carries the user's logged-in Kilo
+                // session (Kilo Pass / Token-Plan addons / BYOK all flow
+                // through it transparently). Profile and binary are
+                // auto-detected when not configured.
+                let user_profile =
+                    resolve_kilo_cli_profile(cfg.kilo_cli_user_profile.as_deref());
+                let binary = resolve_kilo_cli_binary(cfg.kilo_cli_path.as_deref());
+                if cfg.model.trim().is_empty() {
+                    bail!("[api] a model is required for provider = \"kilo_cli\" (e.g. minimax/minimax-m3 or anthropic/claude-sonnet-4.6)");
+                }
+                info!(
+                    binary = %binary,
+                    user_profile = user_profile.as_deref().unwrap_or("<not found>"),
+                    "kilo_cli provider configured"
+                );
+                AiClientConfig::KiloCli {
+                    binary,
+                    model: cfg.model.clone(),
+                    user_profile,
                 }
             }
         };
@@ -312,6 +342,15 @@ impl AiClient {
                     OpenAiFlavor::KiloCode,
                 )
                 .await?
+            }
+            AiClientConfig::KiloCli {
+                binary,
+                model,
+                user_profile,
+            } => {
+                let m = model_ov.unwrap_or(model);
+                self.call_kilo_cli(binary, m, effort, user_profile.as_deref(), &prompt)
+                    .await?
             }
         };
 
@@ -660,6 +699,101 @@ impl AiClient {
             Err(_) => Ok((stdout, None)),
         }
     }
+
+    // ── Kilo CLI subprocess (no API key — borrows the user's logged-in Kilo session) ──
+
+    /// Run a prompt through the user's installed `kilo` CLI. The CLI carries
+    /// the user's Kilo Pass / Token-Plan addons / BYOK transparently — we
+    /// don't see or store any credentials. `--format json` emits NDJSON
+    /// events; we collect the assistant text chunks and the last step's
+    /// token/cost accounting.
+    async fn call_kilo_cli(
+        &self,
+        binary: &str,
+        model: &str,
+        effort: &str,
+        user_profile: Option<&str>,
+        prompt: &str,
+    ) -> Result<(String, Option<CallUsage>)> {
+        use tokio::io::AsyncWriteExt as _;
+
+        // Give the agent a writable workspace so it doesn't refuse to start.
+        // Each call gets a fresh empty dir — the agent has nothing to operate
+        // on, so it just answers the prompt.
+        let workspace = std::env::temp_dir().join(format!("eir-kilo-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&workspace);
+
+        let mut cmd = tokio::process::Command::new(binary);
+        cmd.args(["run", "--auto", "--format", "json", "--agent", "ask"]);
+        if !model.is_empty() {
+            cmd.args(["-m", model]);
+        }
+        if let Some(variant) = kilo_cli_variant(effort) {
+            cmd.args(["--variant", variant]);
+        }
+        cmd.arg("--dir").arg(&workspace);
+        // Reap the subprocess if the future is dropped on timeout.
+        cmd.kill_on_drop(true);
+
+        // Borrow the user's logged-in Kilo session when running as
+        // LocalSystem. Same pattern as `call_claude_cli` — APPDATA /
+        // LOCALAPPDATA are what the Node CLI uses to locate its session.
+        if let Some(profile) = user_profile {
+            let appdata = format!("{profile}\\AppData\\Roaming");
+            let localappdata = format!("{profile}\\AppData\\Local");
+            let homepath = profile.strip_prefix("C:").unwrap_or(profile);
+            cmd.env("USERPROFILE", profile)
+                .env("HOMEPATH", homepath)
+                .env("HOMEDRIVE", "C:")
+                .env("APPDATA", &appdata)
+                .env("LOCALAPPDATA", &localappdata);
+        }
+
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().context(
+            "Failed to spawn the kilo CLI — is it installed (`npm install -g @kilocode/cli`) and logged in on this machine?",
+        )?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .context("Failed to write prompt to kilo CLI stdin")?;
+            // Dropping stdin closes it, signalling EOF so kilo exits.
+        }
+
+        // The kilo CLI is a Node binary with a cold start plus agent loop
+        // (--auto) and JSON event emission, so allow a generous window.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            child.wait_with_output(),
+        )
+        .await
+        .context("kilo CLI timed out after 300s")?
+        .context("kilo CLI process error")?;
+
+        if !output.status.success() {
+            // Exit 124 = kilo's own timeout (treat like ours); 1 = init/runtime
+            // error. Surface stderr so the user can diagnose (e.g. "Not
+            // authenticated — run `kilo` once interactively to log in").
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "kilo CLI exited with {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (text, usage) = parse_kilo_ndjson(&stdout)?;
+        if text.trim().is_empty() {
+            bail!("kilo CLI returned no assistant text");
+        }
+        Ok((text, usage))
+    }
 }
 
 // ── Web-search completion (app-update plan / diagnosis) ───────────────────────
@@ -765,6 +899,18 @@ impl AiClient {
                 )
                 .await
             }
+            AiClientConfig::KiloCli {
+                binary,
+                model,
+                user_profile,
+            } => {
+                // Kilo CLI does the work itself (web search, agent loop if
+                // asked). For our app-update-check we use the same model the
+                // main loop uses, with no reasoning-effort override.
+                let m = if ov.is_empty() { model.as_str() } else { ov };
+                self.call_kilo_cli(binary, m, "", user_profile.as_deref(), prompt)
+                    .await
+            }
         }
     }
 
@@ -814,6 +960,15 @@ impl AiClient {
                     OpenAiFlavor::KiloCode,
                 )
                 .await
+            }
+            AiClientConfig::KiloCli {
+                binary,
+                model,
+                user_profile,
+            } => {
+                let m = if ov.is_empty() { model.as_str() } else { ov };
+                self.call_kilo_cli(binary, m, "", user_profile.as_deref(), prompt)
+                    .await
             }
         }
     }
@@ -993,6 +1148,18 @@ pub(crate) fn claude_cli_model(model: &str) -> String {
     }
 }
 
+/// Map Eir's reasoning-effort levels onto the kilo CLI's `--variant` values
+/// (low|medium|high). The CLI rejects unknown variants, so we collapse
+/// xhigh/max to high and ignore anything else (empty = don't pass the flag).
+fn kilo_cli_variant(effort: &str) -> Option<&'static str> {
+    match effort {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" | "xhigh" | "max" => Some("high"),
+        _ => None,
+    }
+}
+
 /// A configured value counts as "set" if it is non-empty and not the shipped
 /// placeholder (the example config uses "YourName").
 fn is_real(value: &str) -> bool {
@@ -1031,6 +1198,46 @@ fn resolve_claude_binary(configured: Option<&str>, user_profile: Option<&str>) -
         }
     }
     "claude".into()
+}
+
+/// Resolve the Windows user profile whose logged-in Kilo session the service
+/// should borrow. Uses the configured value when set, otherwise scans
+/// `C:\Users` for the first profile holding a Kilo CLI session file.
+/// Kilo (a fork of OpenCode) writes its session to `%APPDATA%\kilo\auth.json`
+/// on Windows; the legacy names (`kilocode`, `opencode`) are checked too so
+/// users upgrading from an older beta aren't penalised.
+fn resolve_kilo_cli_profile(configured: Option<&str>) -> Option<String> {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return Some(p.trim().to_string());
+    }
+    let users = std::fs::read_dir("C:\\Users").ok()?;
+    let candidates = ["kilo", "kilocode", "opencode"];
+    for entry in users.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let appdata = dir.join("AppData").join("Roaming");
+        for name in candidates {
+            // The `auth.json` is the canonical session file; `config.json`
+            // exists too but doesn't prove the user is logged in.
+            if appdata.join(name).join("auth.json").is_file() {
+                return Some(dir.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the path to the `kilo` binary. Uses the configured value when set,
+/// otherwise falls back to `kilo` on PATH. No known canonical install
+/// location on Windows (npm's global `kilo.cmd` lives under the user's
+/// roaming npm folder, which is already on PATH after install).
+fn resolve_kilo_cli_binary(configured: Option<&str>) -> String {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return p.trim().to_string();
+    }
+    "kilo".into()
 }
 
 /// Approximate Anthropic pay-as-you-go pricing (USD per million tokens) so the
@@ -1105,6 +1312,63 @@ fn extract_json_object(s: &str) -> &str {
         (Some(a), Some(b)) if b > a => &s[a..=b],
         _ => s,
     }
+}
+
+/// Parse the kilo CLI's `--format json` NDJSON output. The CLI emits a stream
+/// of events; we concatenate `text` events into the final assistant reply
+/// and keep the latest `step_finish` event's token/cost accounting. Unknown
+/// event types and individual parse failures are skipped — the wire format
+/// is still evolving upstream and we don't want a single bad event to sink
+/// the whole response.
+fn parse_kilo_ndjson(stdout: &str) -> Result<(String, Option<CallUsage>)> {
+    let mut text = String::new();
+    let mut last_step: Option<Value> = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(ev) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match ev["type"].as_str() {
+            Some("text") => {
+                if let Some(t) = ev["text"].as_str() {
+                    text.push_str(t);
+                }
+            }
+            // step_finish arrives at the end of each agent step; the last
+            // one wins. Kilo also emits `session_end` and `step_start`, both
+            // of which we deliberately ignore.
+            Some("step_finish") => last_step = Some(ev),
+            _ => {}
+        }
+    }
+    let usage = last_step.map(|s| {
+        // Kilo's wire format puts tokens under `tokens.{input,output,cache.read,cache.write}`;
+        // be permissive — older betas used `tokens.{input_tokens,output_tokens}`.
+        let tokens = &s["tokens"];
+        let input = tokens["input"].as_u64().unwrap_or_else(|| {
+            tokens["input_tokens"].as_u64().unwrap_or(0)
+        });
+        let output = tokens["output"].as_u64().unwrap_or_else(|| {
+            tokens["output_tokens"].as_u64().unwrap_or(0)
+        });
+        let cache_read = tokens["cache"]["read"].as_u64().unwrap_or_else(|| {
+            tokens["cache_read_input_tokens"].as_u64().unwrap_or(0)
+        });
+        let cache_write = tokens["cache"]["write"].as_u64().unwrap_or_else(|| {
+            tokens["cache_creation_input_tokens"].as_u64().unwrap_or(0)
+        });
+        CallUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_creation: cache_write,
+            cache_read,
+            cost_usd: s["cost"].as_f64().unwrap_or(0.0),
+        }
+    });
+    Ok((text, usage))
 }
 
 fn strip_fences(s: &str) -> &str {
@@ -1225,5 +1489,54 @@ mod tests {
         assert_eq!(buf.next_line().as_deref(), Some(""));
         assert_eq!(buf.next_line().as_deref(), Some("data: [DONE]"));
         assert_eq!(buf.next_line(), None);
+    }
+
+    #[test]
+    fn kilo_ndjson_collects_text_and_keeps_last_step_usage() {
+        // A realistic stream: noise events, text chunks, step_finish with
+        // tokens + cost, then session_end. Text must concatenate in order;
+        // usage must come from the LAST step_finish.
+        let stream = r#"
+{"type":"step_start","sessionID":"abc"}
+{"type":"text","text":"hello "}
+{"type":"text","text":"world"}
+{"type":"step_finish","cost":0.001,"tokens":{"input":100,"output":20,"cache":{"read":0,"write":50}}}
+{"type":"text","text":"!"}
+{"type":"step_finish","cost":0.002,"tokens":{"input":150,"output":25,"cache":{"read":10,"write":50}}}
+{"type":"session_end"}
+"#;
+        let (text, usage) = parse_kilo_ndjson(stream).unwrap();
+        assert_eq!(text, "hello world!");
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 150);
+        assert_eq!(u.output_tokens, 25);
+        assert_eq!(u.cache_read, 10);
+        assert_eq!(u.cache_creation, 50);
+        assert!((u.cost_usd - 0.002).abs() < 1e-9);
+    }
+
+    #[test]
+    fn kilo_ndjson_tolerates_garbage_lines_and_alternate_token_shape() {
+        // Random log noise on stdout + an older beta that used
+        // input_tokens/output_tokens instead of input/output.
+        let stream = "Some log preamble\n[stderr-redir] debug: hi\n\
+            {\"type\":\"text\",\"text\":\"ok\"}\n\
+            {\"type\":\"step_finish\",\"cost\":0.01,\"tokens\":{\"input_tokens\":7,\"output_tokens\":3,\"cache\":{\"read\":0,\"write\":0}}}\n";
+        let (text, usage) = parse_kilo_ndjson(stream).unwrap();
+        assert_eq!(text, "ok");
+        let u = usage.unwrap();
+        assert_eq!(u.input_tokens, 7);
+        assert_eq!(u.output_tokens, 3);
+    }
+
+    #[test]
+    fn kilo_cli_variant_mapping() {
+        assert_eq!(kilo_cli_variant(""), None);
+        assert_eq!(kilo_cli_variant("low"), Some("low"));
+        assert_eq!(kilo_cli_variant("medium"), Some("medium"));
+        assert_eq!(kilo_cli_variant("high"), Some("high"));
+        assert_eq!(kilo_cli_variant("xhigh"), Some("high"));
+        assert_eq!(kilo_cli_variant("max"), Some("high"));
+        assert_eq!(kilo_cli_variant("bogus"), None);
     }
 }

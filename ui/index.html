@@ -411,6 +411,7 @@
             <option value="claude_cli">Claude — your subscription (Claude CLI, no key)</option>
             <option value="anthropic">Claude — Anthropic API key</option>
             <option value="kilocode">Kilo Code gateway</option>
+            <option value="kilo_cli">Kilo Code — your subscription (Kilo CLI, no key)</option>
           </select>
           <span class="set-hint" id="provider-hint"></span>
           <label for="set-model">Model</label>
@@ -432,6 +433,10 @@
           <input id="set-an-key" type="password" autocomplete="off">
           <label for="set-kilo-key">Kilo Code key</label>
           <input id="set-kilo-key" type="password" autocomplete="off">
+          <label for="set-kilo-profile">Kilo CLI user profile</label>
+          <input id="set-kilo-profile" type="text" placeholder="C:\Users\You  (blank = auto-detect)">
+          <label for="set-kilo-path">Kilo CLI binary path</label>
+          <input id="set-kilo-path" type="text" placeholder="kilo  (blank = on PATH)">
           <label for="set-conf">Auto-fix confidence (%)</label>
           <input id="set-conf" type="number" min="50" max="95" step="5" placeholder="80">
           <label for="set-decint">Decision interval (s)</label>

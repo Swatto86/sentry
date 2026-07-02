@@ -93,7 +93,8 @@ Four providers:
 | **OpenRouter** *(default)* | Free models | Yes — web plugin | Recommended. `openrouter/free` auto-routes to a current free model; needs an API key. |
 | **Claude CLI (your subscription)** | Uses your Claude plan | Yes — CLI built-in | **No API key** — reuses your logged-in `claude` session; profile and binary auto-detected. |
 | **Claude (Anthropic API)** | Pay-as-you-go | Yes — native web_search tool | API key from console.anthropic.com; token usage tracked, cost estimated from list pricing. |
-| **Kilo Code** | Depends on model | No | One key for 500+ models via the Kilo gateway (app.kilo.ai); models in `provider/model` format. |
+| **Kilo Code** | Depends on model | No | One key for 500+ models via the Kilo gateway (app.kilo.ai); models in `provider/model` format, e.g. `anthropic/claude-sonnet-4.6` or `minimax/minimax-m3` for the Minimax coding plan (BYOK key works the same way — paste it, set the model, save). |
+| **Kilo Code — your subscription (Kilo CLI)** | Uses your Kilo plan (Pass + addon BYOK included) | Yes — the CLI's built-in | **No API key** — borrows your logged-in `kilo` session, same way the Claude CLI borrows a logged-in Claude subscription. Install with `npm install -g @kilocode/cli`, run `kilo` once to sign in, then pick the provider in Settings with a `provider/model` id (e.g. `minimax/minimax-m3`). Profile / binary are auto-detected. |
 
 The monitoring loop and the **app-update check** both use your configured provider.
 The app-update check uses live web search where the provider supports it: OpenRouter's
