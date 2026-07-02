@@ -71,17 +71,20 @@ impl AdvisorConfig {
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ApiProvider {
-    /// Anthropic native API (`/v1/messages`). Legacy `claude_cli` /
-    /// `openai_compatible` configs alias here so an old config.toml still loads
-    /// (they then need a key set in Settings before analysis resumes).
+    /// Anthropic native API (`/v1/messages`, API key). The legacy
+    /// `openai_compatible` provider aliases here so an old config.toml still
+    /// loads (it then needs a key set in Settings before analysis resumes).
     #[default]
     #[serde(
         rename = "anthropic",
-        alias = "claude_cli",
         alias = "openai_compatible",
         alias = "open_ai_compatible"
     )]
     Anthropic,
+    /// Claude via the local `claude` CLI — no API key, uses the machine's
+    /// logged-in Claude subscription session.
+    #[serde(rename = "claude_cli")]
+    ClaudeCli,
     /// OpenRouter (openrouter.ai) — OpenAI-compatible; supports free models.
     #[serde(rename = "openrouter", alias = "open_router")]
     OpenRouter,
@@ -94,6 +97,7 @@ impl ApiProvider {
     pub fn as_str(&self) -> &'static str {
         match self {
             ApiProvider::Anthropic => "anthropic",
+            ApiProvider::ClaudeCli => "claude_cli",
             ApiProvider::OpenRouter => "openrouter",
             ApiProvider::KiloCode => "kilocode",
         }
@@ -101,6 +105,7 @@ impl ApiProvider {
 
     fn parse(s: &str) -> ApiProvider {
         match s {
+            "claude_cli" => ApiProvider::ClaudeCli,
             "openrouter" | "open_router" => ApiProvider::OpenRouter,
             "kilocode" | "kilo" => ApiProvider::KiloCode,
             _ => ApiProvider::Anthropic,
@@ -126,10 +131,20 @@ pub struct ApiConfig {
     #[serde(default)]
     pub update_check_model: String,
     /// Reasoning effort: low|medium|high|xhigh|max, empty = provider default.
-    /// Maps to `output_config.effort` (Anthropic) / `reasoning.effort`
-    /// (OpenRouter, Kilo Code); models without a reasoning dial may reject it.
+    /// Maps to `output_config.effort` (Anthropic), `reasoning.effort`
+    /// (OpenRouter, Kilo Code), or `--effort` (Claude CLI); models without a
+    /// reasoning dial may reject it.
     #[serde(default)]
     pub effort: String,
+    /// claude_cli: path to the claude binary. Blank = auto-detect
+    /// (`<profile>\.local\bin\claude.exe`, then PATH).
+    #[serde(default)]
+    pub claude_cli_path: Option<String>,
+    /// claude_cli: the Windows user profile root (e.g. C:\Users\You) whose
+    /// logged-in Claude session the LocalSystem service borrows. Blank =
+    /// auto-detect by scanning C:\Users for `.claude\.credentials.json`.
+    #[serde(default)]
+    pub user_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -328,21 +343,42 @@ audit_db = "./eir.db"
     }
 
     #[test]
-    fn removed_providers_alias_to_anthropic() {
-        // A config written by an older build (claude_cli / openai_compatible,
-        // possibly with now-removed extra fields like base_url/user_profile)
-        // must still load — those providers alias to Anthropic and unknown
-        // keys are ignored by the toml loader.
-        for legacy in ["claude_cli", "openai_compatible"] {
-            let src = SAMPLE.replace(
-                "provider = \"anthropic\"",
-                &format!(
-                    "provider = \"{legacy}\"\nbase_url = \"http://localhost:8080/v1\"\nuser_profile = 'C:\\Users\\X'"
-                ),
-            );
-            let cfg: Config = toml::from_str(&src).unwrap();
-            assert_eq!(cfg.api.provider.as_str(), "anthropic");
-        }
+    fn removed_provider_aliases_to_anthropic() {
+        // A config written by an older build (openai_compatible, possibly with
+        // its now-removed base_url/api_key fields) must still load — it aliases
+        // to Anthropic and unknown keys are ignored by the toml loader.
+        let src = SAMPLE.replace(
+            "provider = \"anthropic\"",
+            "provider = \"openai_compatible\"\nbase_url = \"http://localhost:8080/v1\"\napi_key = \"not-needed\"",
+        );
+        let cfg: Config = toml::from_str(&src).unwrap();
+        assert_eq!(cfg.api.provider.as_str(), "anthropic");
+    }
+
+    #[test]
+    fn claude_cli_provider_round_trips_with_no_key_or_model() {
+        // The subscription path: a v0.16-style config (claude_cli, blank model,
+        // optional profile/binary hints) parses as its own provider again and
+        // survives a save/load cycle.
+        let src = SAMPLE.replace(
+            "provider = \"anthropic\"",
+            "provider = \"claude_cli\"\nuser_profile = 'C:\\Users\\X'\nclaude_cli_path = 'C:\\Users\\X\\.local\\bin\\claude.exe'",
+        );
+        let cfg: Config = toml::from_str(&src).unwrap();
+        assert_eq!(cfg.api.provider, ApiProvider::ClaudeCli);
+        assert_eq!(cfg.api.user_profile.as_deref(), Some("C:\\Users\\X"));
+
+        let serialized = toml::to_string_pretty(&cfg).unwrap();
+        let reparsed: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.api.provider, ApiProvider::ClaudeCli);
+        assert_eq!(
+            reparsed.api.claude_cli_path.as_deref(),
+            Some("C:\\Users\\X\\.local\\bin\\claude.exe")
+        );
+
+        // And the UI settings projection reports the provider token the
+        // Settings dropdown uses.
+        assert_eq!(reparsed.to_ui_settings().provider, "claude_cli");
     }
 
     #[test]

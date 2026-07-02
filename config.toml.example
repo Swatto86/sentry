@@ -1,5 +1,5 @@
 [api]
-# Three native providers: "openrouter", "anthropic", "kilocode".
+# Four providers: "openrouter", "claude_cli", "anthropic", "kilocode".
 # Everything here is editable in the app's Settings panel — no need to touch
 # this file after install.
 
@@ -13,21 +13,34 @@ model = "openrouter/free" # auto-routes to a free model; or pin one from https:/
 
 # Model for the on-demand app-update check. OpenRouter/Kilo: blank = the main
 # model (OpenRouter adds live web search via its web plugin). Anthropic: blank =
-# claude-haiku-4-5 with native web search. Editable in Settings.
+# claude-haiku-4-5 with native web search. Claude CLI: blank = haiku with the
+# CLI's built-in search. Editable in Settings.
 update_check_model = ""
 
 # Reasoning effort: low|medium|high|xhigh|max (blank = provider default).
-# Anthropic → output_config.effort; OpenRouter/Kilo → reasoning.effort.
+# Anthropic → output_config.effort; OpenRouter/Kilo → reasoning.effort;
+# Claude CLI → --effort.
 effort = ""
 
-# ── Option B: Anthropic native API ────────────────────────────────────────────
+# ── Option B: Claude via your subscription (Claude CLI — no API key) ──────────
+# Uses the machine's logged-in `claude` session; nothing is billed beyond your
+# Claude plan. The service runs as LocalSystem, so leave user_profile and
+# claude_cli_path blank and it auto-detects: it scans C:\Users for the profile
+# holding a logged-in session (~/.claude/.credentials.json) and finds claude.exe
+# under it.
+# provider = "claude_cli"
+# model = ""   # blank = the CLI's configured default, or e.g. "sonnet" / "claude-opus-4-8"
+# user_profile = "C:\\Users\\YourName"                              # optional override
+# claude_cli_path = "C:\\Users\\YourName\\.local\\bin\\claude.exe"  # optional override
+
+# ── Option C: Anthropic native API ────────────────────────────────────────────
 # Key from https://console.anthropic.com — token usage is tracked and cost is
 # estimated from list pricing.
 # provider = "anthropic"
 # anthropic_api_key = "sk-ant-..."
 # model = "claude-opus-4-8"   # or claude-sonnet-4-6 / claude-haiku-4-5
 
-# ── Option C: Kilo Code gateway ───────────────────────────────────────────────
+# ── Option D: Kilo Code gateway ───────────────────────────────────────────────
 # One key for 500+ models via api.kilo.ai. Create a key at https://app.kilo.ai
 # provider = "kilocode"
 # kilocode_api_key = "..."

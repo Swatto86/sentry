@@ -93,6 +93,23 @@ enum OpenAiFlavor {
     KiloCode,
 }
 
+// ── Claude CLI JSON envelope (claude --print --output-format json) ────────────
+
+#[derive(Deserialize)]
+struct ClaudeCliResult {
+    result: Option<String>,
+    total_cost_usd: Option<f64>,
+    usage: Option<ClaudeCliUsage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeCliUsage {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+}
+
 /// Accumulates raw SSE bytes and yields complete lines. Byte-based on purpose:
 /// converting each network chunk to &str would silently drop a whole chunk when
 /// a multi-byte UTF-8 character straddles a chunk boundary.
@@ -128,9 +145,25 @@ pub struct AiClient {
 }
 
 enum AiClientConfig {
-    Anthropic { api_key: String, model: String },
-    OpenRouter { api_key: String, model: String },
-    KiloCode { api_key: String, model: String },
+    Anthropic {
+        api_key: String,
+        model: String,
+    },
+    /// Claude via the local `claude` CLI — no API key; borrows the machine's
+    /// logged-in Claude subscription session.
+    ClaudeCli {
+        binary: String,
+        model: String,
+        user_profile: Option<String>,
+    },
+    OpenRouter {
+        api_key: String,
+        model: String,
+    },
+    KiloCode {
+        api_key: String,
+        model: String,
+    },
 }
 
 impl AiClient {
@@ -148,6 +181,24 @@ impl AiClient {
                 AiClientConfig::Anthropic {
                     api_key: key,
                     model: cfg.model.clone(),
+                }
+            }
+            ApiProvider::ClaudeCli => {
+                // No key required — the CLI carries the user's Claude
+                // subscription session. Profile and binary are auto-detected
+                // when not configured.
+                let user_profile = resolve_user_profile(cfg.user_profile.as_deref());
+                let binary =
+                    resolve_claude_binary(cfg.claude_cli_path.as_deref(), user_profile.as_deref());
+                info!(
+                    binary = %binary,
+                    user_profile = user_profile.as_deref().unwrap_or("<not found>"),
+                    "claude_cli provider configured"
+                );
+                AiClientConfig::ClaudeCli {
+                    binary,
+                    model: cfg.model.clone(),
+                    user_profile,
                 }
             }
             ApiProvider::OpenRouter => {
@@ -228,6 +279,15 @@ impl AiClient {
             AiClientConfig::Anthropic { api_key, model } => {
                 let m = model_ov.unwrap_or(model);
                 self.call_anthropic(api_key, m, effort, &prompt).await?
+            }
+            AiClientConfig::ClaudeCli {
+                binary,
+                model,
+                user_profile,
+            } => {
+                let m = model_ov.unwrap_or(model);
+                self.call_claude_cli(binary, m, effort, user_profile.as_deref(), &prompt)
+                    .await?
             }
             AiClientConfig::OpenRouter { api_key, model } => {
                 let m = model_ov.unwrap_or(model);
@@ -500,6 +560,106 @@ impl AiClient {
         }
         Ok((out, usage))
     }
+
+    // ── Claude CLI subprocess (no API key — uses the logged-in claude session) ──
+
+    async fn call_claude_cli(
+        &self,
+        binary: &str,
+        model: &str,
+        effort: &str,
+        user_profile: Option<&str>,
+        prompt: &str,
+    ) -> Result<(String, Option<CallUsage>)> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let mut cmd = tokio::process::Command::new(binary);
+        // JSON output gives us the response text plus token/cost usage.
+        cmd.args(["--print", "--output-format", "json"]);
+        if !model.is_empty() {
+            cmd.args(["--model", model]);
+        }
+        // Reasoning effort (low|medium|high|xhigh|max); validated upstream.
+        if !effort.is_empty() {
+            cmd.args(["--effort", effort]);
+        }
+        // Reap the (large) claude process if this future is dropped on timeout.
+        cmd.kill_on_drop(true);
+
+        // When the service runs as LocalSystem, set user-space env vars so the CLI
+        // can locate the logged-in session stored in the user's AppData.
+        if let Some(profile) = user_profile {
+            let appdata = format!("{profile}\\AppData\\Roaming");
+            let localappdata = format!("{profile}\\AppData\\Local");
+            let homepath = profile.strip_prefix("C:").unwrap_or(profile);
+            cmd.env("USERPROFILE", profile)
+                .env("HOMEPATH", homepath)
+                .env("HOMEDRIVE", "C:")
+                .env("APPDATA", &appdata)
+                .env("LOCALAPPDATA", &localappdata);
+        }
+
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().context(
+            "Failed to spawn the claude CLI — is it installed and logged in on this machine?",
+        )?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .context("Failed to write prompt to claude CLI stdin")?;
+        }
+
+        // The claude CLI is a large binary with a cold Node start plus full
+        // model inference and no streaming, so allow a generous window.
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            child.wait_with_output(),
+        )
+        .await
+        .context("claude CLI timed out after 300s")?
+        .context("claude CLI process error")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "claude CLI exited with {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if stdout.is_empty() {
+            bail!("claude CLI returned empty output");
+        }
+
+        // Parse the JSON envelope: { result, total_cost_usd, usage: {...} }.
+        // Fall back to treating stdout as raw text if it isn't the expected shape.
+        match serde_json::from_str::<ClaudeCliResult>(&stdout) {
+            Ok(env) => {
+                let text = env.result.unwrap_or_default();
+                if text.trim().is_empty() {
+                    bail!("claude CLI returned an empty result");
+                }
+                // total_cost_usd is the *equivalent* API cost — the call itself
+                // is covered by the subscription.
+                let usage = env.usage.map(|u| CallUsage {
+                    input_tokens: u.input_tokens.unwrap_or(0),
+                    output_tokens: u.output_tokens.unwrap_or(0),
+                    cache_creation: u.cache_creation_input_tokens.unwrap_or(0),
+                    cache_read: u.cache_read_input_tokens.unwrap_or(0),
+                    cost_usd: env.total_cost_usd.unwrap_or(0.0),
+                });
+                Ok((text, usage))
+            }
+            Err(_) => Ok((stdout, None)),
+        }
+    }
 }
 
 // ── Web-search completion (app-update plan / diagnosis) ───────────────────────
@@ -581,6 +741,17 @@ impl AiClient {
                 let m = anthropic_web_model(ov);
                 self.call_anthropic_web(api_key, &m, prompt).await
             }
+            AiClientConfig::ClaudeCli {
+                binary,
+                user_profile,
+                ..
+            } => {
+                // The CLI's built-in web search does the grounding; blank or
+                // non-Claude override models coerce to the cheap haiku alias.
+                let m = claude_cli_model(ov);
+                self.call_claude_cli(binary, &m, &self.effort, user_profile.as_deref(), prompt)
+                    .await
+            }
             AiClientConfig::KiloCode { api_key, model } => {
                 // No verified web plugin on the Kilo gateway — plain completion.
                 let m = if ov.is_empty() { model.as_str() } else { ov };
@@ -610,6 +781,15 @@ impl AiClient {
             AiClientConfig::Anthropic { api_key, .. } => {
                 let m = anthropic_web_model(ov);
                 self.call_anthropic(api_key, &m, "", prompt).await
+            }
+            AiClientConfig::ClaudeCli {
+                binary,
+                user_profile,
+                ..
+            } => {
+                let m = claude_cli_model(ov);
+                self.call_claude_cli(binary, &m, "", user_profile.as_deref(), prompt)
+                    .await
             }
             AiClientConfig::OpenRouter { api_key, model } => {
                 let m = if ov.is_empty() { model.as_str() } else { ov };
@@ -797,6 +977,62 @@ pub(crate) fn anthropic_web_model(override_model: &str) -> String {
     }
 }
 
+/// Map a requested model to one the Claude CLI accepts. Claude aliases
+/// (`haiku`/`sonnet`/`opus`) and any `claude*` id pass through; everything else
+/// — blank, or a non-Claude id such as an OpenRouter model — becomes `haiku`
+/// (cheap default for the web/labelling calls on this provider).
+pub(crate) fn claude_cli_model(model: &str) -> String {
+    let m = model.trim();
+    let lower = m.to_lowercase();
+    let is_claude =
+        matches!(lower.as_str(), "haiku" | "sonnet" | "opus") || lower.starts_with("claude");
+    if is_claude {
+        m.to_string()
+    } else {
+        "haiku".to_string()
+    }
+}
+
+/// A configured value counts as "set" if it is non-empty and not the shipped
+/// placeholder (the example config uses "YourName").
+fn is_real(value: &str) -> bool {
+    let v = value.trim();
+    !v.is_empty() && !v.contains("YourName")
+}
+
+/// Resolve the Windows user profile whose logged-in `claude` session the service
+/// should borrow. Uses the configured value when set, otherwise scans `C:\Users`
+/// for the first profile holding a Claude CLI credentials file.
+fn resolve_user_profile(configured: Option<&str>) -> Option<String> {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return Some(p.trim().to_string());
+    }
+    let users = std::fs::read_dir("C:\\Users").ok()?;
+    for entry in users.flatten() {
+        let dir = entry.path();
+        if dir.join(".claude").join(".credentials.json").is_file() {
+            return Some(dir.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Resolve the path to the `claude` binary. Uses the configured value when set,
+/// otherwise looks for the standard install location under the resolved user
+/// profile, and finally falls back to "claude" (must then be on PATH).
+fn resolve_claude_binary(configured: Option<&str>, user_profile: Option<&str>) -> String {
+    if let Some(p) = configured.filter(|p| is_real(p)) {
+        return p.trim().to_string();
+    }
+    if let Some(up) = user_profile {
+        let candidate = format!("{up}\\.local\\bin\\claude.exe");
+        if std::path::Path::new(&candidate).is_file() {
+            return candidate;
+        }
+    }
+    "claude".into()
+}
+
 /// Approximate Anthropic pay-as-you-go pricing (USD per million tokens) so the
 /// usage display and advisor budget have a cost figure — the API reports token
 /// counts but not cost. Prices drift over time; treat as an estimate.
@@ -904,6 +1140,33 @@ mod tests {
         assert_eq!(anthropic_web_model("opus"), "claude-opus-4-8");
         assert_eq!(anthropic_web_model("claude-opus-4-8"), "claude-opus-4-8");
         assert_eq!(anthropic_web_model("openrouter/free"), "claude-haiku-4-5");
+    }
+
+    #[test]
+    fn claude_cli_model_coercion() {
+        // Aliases and claude-* ids pass through; blank/non-Claude → haiku.
+        assert_eq!(claude_cli_model(""), "haiku");
+        assert_eq!(claude_cli_model("haiku"), "haiku");
+        assert_eq!(claude_cli_model("opus"), "opus");
+        assert_eq!(claude_cli_model("claude-opus-4-8"), "claude-opus-4-8");
+        assert_eq!(claude_cli_model("openrouter/free"), "haiku");
+    }
+
+    #[test]
+    fn claude_cli_envelope_parses_usage() {
+        // The wire-format decode for the CLI's JSON envelope.
+        let raw = r#"{"result":"{\"analysis\":\"ok\"}","total_cost_usd":0.0123,
+            "usage":{"input_tokens":100,"output_tokens":20,
+            "cache_creation_input_tokens":5,"cache_read_input_tokens":50}}"#;
+        let env: ClaudeCliResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(env.result.as_deref(), Some("{\"analysis\":\"ok\"}"));
+        assert_eq!(env.total_cost_usd, Some(0.0123));
+        let u = env.usage.unwrap();
+        assert_eq!(u.input_tokens, Some(100));
+        assert_eq!(u.cache_read_input_tokens, Some(50));
+        // Partial envelopes (no usage) still parse.
+        let sparse: ClaudeCliResult = serde_json::from_str(r#"{"result":"hi"}"#).unwrap();
+        assert!(sparse.usage.is_none());
     }
 
     #[test]

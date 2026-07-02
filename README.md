@@ -86,19 +86,21 @@ Each decision cycle (default every 10 minutes):
 
 Everything is configurable in the **Settings** panel — no file editing required.
 
-Three native providers:
+Four providers:
 
 | Provider | Cost | Web search | Notes |
 |----------|------|------------|-------|
 | **OpenRouter** *(default)* | Free models | Yes — web plugin | Recommended. `openrouter/free` auto-routes to a current free model; needs an API key. |
+| **Claude CLI (your subscription)** | Uses your Claude plan | Yes — CLI built-in | **No API key** — reuses your logged-in `claude` session; profile and binary auto-detected. |
 | **Claude (Anthropic API)** | Pay-as-you-go | Yes — native web_search tool | API key from console.anthropic.com; token usage tracked, cost estimated from list pricing. |
 | **Kilo Code** | Depends on model | No | One key for 500+ models via the Kilo gateway (app.kilo.ai); models in `provider/model` format. |
 
 The monitoring loop and the **app-update check** both use your configured provider.
 The app-update check uses live web search where the provider supports it: OpenRouter's
-web plugin (works with free models — about £0.004 per check for the search) or
-Anthropic's native web-search tool (`update_check_model`, default **claude-haiku-4-5**).
-On Kilo Code the check runs from model knowledge and Eir's validation gates.
+web plugin (works with free models — about £0.004 per check for the search),
+Anthropic's native web-search tool, or the Claude CLI's built-in search
+(`update_check_model`, blank = a cheap Haiku default). On Kilo Code the check runs
+from model knowledge and Eir's validation gates.
 
 ## Features
 
@@ -147,9 +149,10 @@ On Kilo Code the check runs from model knowledge and Eir's validation gates.
    connects.
 4. The default provider is **OpenRouter**. Open **Settings**, paste your
    [OpenRouter API key](https://openrouter.ai/keys), and Save — that's all it needs
-   (the `openrouter/free` model is preset). Prefer Claude or Kilo Code? Switch the
-   provider in Settings and paste the matching key (console.anthropic.com /
-   app.kilo.ai) plus a model.
+   (the `openrouter/free` model is preset). Prefer Claude? Switch the provider to
+   **Claude — your subscription (Claude CLI)**, which reuses your logged-in
+   `claude` session and needs no key — or use an Anthropic API key / Kilo Code
+   key (console.anthropic.com / app.kilo.ai) plus a model.
 
 Already installed? Eir updates itself automatically.
 

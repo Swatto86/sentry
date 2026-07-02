@@ -121,14 +121,23 @@ const STATUS_META = {
 };
 
 function providerName(p) {
-  return ({ openrouter: 'OpenRouter', anthropic: 'Claude (Anthropic)', kilocode: 'Kilo Code' })[p] || p || '';
+  return ({
+    openrouter: 'OpenRouter',
+    claude_cli: 'Claude CLI',
+    anthropic: 'Claude (Anthropic)',
+    kilocode: 'Kilo Code',
+  })[p] || p || '';
 }
 
 // Model (and effort) used for issue analysis — the main monitoring loop.
 function analysisLabel(s) {
   if (!s) return '';
   let model = (s.model || '').trim();
-  if (!model) model = s.provider === 'openrouter' ? 'openrouter/free' : '(no model set)';
+  if (!model) {
+    model = s.provider === 'openrouter' ? 'openrouter/free'
+      : s.provider === 'claude_cli' ? 'default model'
+      : '(no model set)';
+  }
   let label = `${providerName(s.provider)} · ${model}`;
   const effort = (s.effort || '').trim();
   if (effort) label += ` · ${effort} effort`;
@@ -141,6 +150,11 @@ function updateCheckLabel(s) {
   const m = (s.update_check_model || '').trim();
   if (s.provider === 'anthropic') {
     return `Claude · ${m || 'claude-haiku-4-5'} + web`;
+  }
+  if (s.provider === 'claude_cli') {
+    const lower = m.toLowerCase();
+    const isClaude = ['haiku', 'sonnet', 'opus'].includes(lower) || lower.startsWith('claude');
+    return `Claude CLI · ${isClaude ? m : 'haiku'} + web`;
   }
   const main = (s.model || '').trim() || (s.provider === 'openrouter' ? 'openrouter/free' : '');
   const web = s.provider === 'openrouter' ? ' + web' : '';
@@ -368,11 +382,17 @@ function renderUsage(u) {
   if (!u) { card.style.display = 'none'; return; }
   card.style.display = 'block';
   const provider = (lastStatus && lastStatus.settings && lastStatus.settings.provider) || '';
+  // Claude CLI runs on the subscription: no charge, so cost cells show a dash
+  // (the CLI's figures are only the equivalent API cost).
+  const free = provider === 'claude_cli';
+  const costCell = (c) => (free ? '—' : fmtGbp(c));
   const note = provider === 'openrouter'
     ? 'OpenRouter-reported cost — £0.00 on free models.'
-    : provider === 'anthropic'
-      ? 'Estimated from Anthropic list pricing.'
-      : 'Provider-reported cost where available.';
+    : provider === 'claude_cli'
+      ? 'No charge — uses your Claude subscription. Token counts shown for transparency.'
+      : provider === 'anthropic'
+        ? 'Estimated from Anthropic list pricing.'
+        : 'Provider-reported cost where available.';
   document.getElementById('usage-body').innerHTML = `
     <div class="usage-grid">
       <div></div><div class="usage-h">Last 24h</div><div class="usage-h">Last 7 days</div>
@@ -381,7 +401,7 @@ function renderUsage(u) {
       <div class="usage-l">Tokens</div>
       <div class="usage-v">${fmtTokens(u.tokens_today)}</div><div class="usage-v">${fmtTokens(u.tokens_week)}</div>
       <div class="usage-l">Est. cost</div>
-      <div class="usage-v">${fmtGbp(u.cost_today_usd)}</div><div class="usage-v">${fmtGbp(u.cost_week_usd)}</div>
+      <div class="usage-v">${costCell(u.cost_today_usd)}</div><div class="usage-v">${costCell(u.cost_week_usd)}</div>
     </div>
     <div class="usage-note">${note}</div>
   `;
@@ -526,6 +546,7 @@ document.getElementById('learned-list').addEventListener('click', (e) => {
 
 const PROVIDER_HINTS = {
   openrouter: 'One key, hundreds of models — free ones included. Blank model auto-routes to a free model. Key: openrouter.ai/keys',
+  claude_cli: 'Uses your Claude subscription via the logged-in claude CLI — no API key. Auto-detects your profile and claude.exe. Blank model = the CLI default; aliases like haiku/sonnet/opus work.',
   anthropic: 'Claude direct from Anthropic. A model is required (e.g. claude-opus-4-8, claude-haiku-4-5). Key: console.anthropic.com',
   kilocode: 'Kilo Code AI gateway — 500+ models in provider/model format (e.g. anthropic/claude-sonnet-4.6). Key: app.kilo.ai',
 };
